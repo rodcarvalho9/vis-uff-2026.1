@@ -1,7 +1,14 @@
 import { Taxi } from "./taxi";
-import { loadMeanFarePerMinuteBarChart, loadMeanFarePerMileBarChart, clearChart } from './plot';
+import { loadMeanEarnPerMinuteBarChart, loadTripsPerBoroughPieChart } from './plot';
 
-function callbacks(mean_fare_per_minute_data, mean_fare_per_mile_data) {
+const CHART_SELECTORS = [
+    '#chart-mean-earn-per-minute_pu',
+    '#chart-mean-earn-per-minute_do',
+    '#chart-trips-per-borough_pu',
+    '#chart-trips-per-borough_do'
+];
+
+function callbacks(mean_earn_per_minute_pu_data, mean_earn_per_minute_do_data, trips_per_borough_pu_data, trips_per_borough_do_data) {
     const loadBtn  = document.querySelector('#loadBtn');
     const clearBtn = document.querySelector('#clearBtn');
 
@@ -11,7 +18,7 @@ function callbacks(mean_fare_per_minute_data, mean_fare_per_mile_data) {
 
     loadBtn.addEventListener('click', async () => {
         clearAll();
-        await loadAll(mean_fare_per_minute_data, mean_fare_per_mile_data);
+        await loadAll(mean_earn_per_minute_pu_data, mean_earn_per_minute_do_data, trips_per_borough_pu_data, trips_per_borough_do_data);
     });
 
     clearBtn.addEventListener('click', async () => {
@@ -19,17 +26,73 @@ function callbacks(mean_fare_per_minute_data, mean_fare_per_mile_data) {
     });
 }
 
-async function loadAll(mean_fare_per_minute_data, mean_fare_per_mile_data) {
-    await loadMeanFarePerMinuteBarChart(mean_fare_per_minute_data, '#chart-mean-fare-per-minute');
-    await loadMeanFarePerMileBarChart(mean_fare_per_mile_data, '#chart-mean-fare-per-mile');
+async function loadAll(mean_earn_per_minute_pu_data, mean_earn_per_minute_do_data, trips_per_borough_pu_data, trips_per_borough_do_data) {
+    await loadMeanEarnPerMinuteBarChart(mean_earn_per_minute_pu_data, '#chart-mean-earn-per-minute_pu');
+    await loadMeanEarnPerMinuteBarChart(mean_earn_per_minute_do_data, '#chart-mean-earn-per-minute_do');
+    await loadTripsPerBoroughPieChart(trips_per_borough_pu_data, '#chart-trips-per-borough_pu');
+    await loadTripsPerBoroughPieChart(trips_per_borough_do_data, '#chart-trips-per-borough_do');
 }
 
 function clearAll() {
-    const chartIds = ['#chart-mean-fare-per-minute', '#chart-mean-fare-per-mile'];
+    CHART_SELECTORS.forEach((selector) => {
+        const chart = document.querySelector(selector);
+
+        if (chart) {
+            chart.replaceChildren();
+        }
+    });
+}
+
+function generateEarnPerMinuteSQL(boroughType = 'pu_borough') {
+    const boroughColumn = boroughType === 'do_borough' ? 'do_borough' : 'pu_borough';
     
-    for (const chartId of chartIds) {
-        clearChart(chartId);
-    }
+    return `
+        WITH metricas_por_viagem AS (
+        SELECT
+            ${boroughColumn},
+            -- Tarifa base por minuto (calculada para todas as linhas)
+            (fare_amount + extra) / trip_duration_minutes AS base_rate,
+            -- Gorjeta por minuto (será NULL onde tip_amount for NULL)
+            tip_amount / trip_duration_minutes AS tip_rate
+        FROM
+            taxi_2023
+        WHERE
+            ${boroughColumn} NOT IN ('Unknown', 'N/A')
+            AND trip_duration_minutes > 1 
+            AND fare_amount > 0
+    )
+    SELECT
+        ${boroughColumn},
+        AVG(base_rate) AS avg_base_per_minute,
+        AVG(tip_rate) AS avg_tip_per_minute,
+        -- Soma das médias (usando COALESCE para o caso de 0 gorjetas no bairro)
+        (AVG(base_rate) + COALESCE(AVG(tip_rate), 0)) AS mean_earn_per_minute
+    FROM
+        metricas_por_viagem
+    GROUP BY
+        ${boroughColumn}
+    ORDER BY
+        mean_earn_per_minute DESC
+    `;
+}
+
+function generateTripsPerBoroughSQL(boroughType = 'pu_borough') {
+    const boroughColumn = boroughType === 'do_borough' ? 'do_borough' : 'pu_borough';
+    
+    return `
+        SELECT
+        ${boroughColumn},
+        COUNT(*) AS total_viagens
+    FROM
+        taxi_2023
+    WHERE
+        -- Mantendo a consistência: ignorando bairros não identificados
+        ${boroughColumn} NOT IN ('Unknown', 'N/A')
+    GROUP BY
+        ${boroughColumn}
+    ORDER BY
+        total_viagens DESC
+    `;
 }
 
 window.onload = async () => {
@@ -38,36 +101,18 @@ window.onload = async () => {
     await taxi.init();
     await taxi.loadTaxi();
 
-    const mean_fare_per_minute_sql = `
-        SELECT
-            pu_borough,
-            AVG(fare_per_minute) AS fare_per_minute_mean
-        FROM
-            taxi_2023
-        WHERE
-            pu_borough NOT IN ('Unknown', 'N/A', 'EWR')
-        GROUP BY
-            pu_borough
-    `;
+    const mean_earn_per_minute_pu_data = await taxi.query(generateEarnPerMinuteSQL('pu_borough'));
+    console.log(mean_earn_per_minute_pu_data);
 
-    const mean_fare_per_minute_data = await taxi.query(mean_fare_per_minute_sql);
-    console.log(mean_fare_per_minute_data);
+    const mean_earn_per_minute_do_data = await taxi.query(generateEarnPerMinuteSQL('do_borough'));
+    console.log(mean_earn_per_minute_do_data);
 
-    const mean_fare_per_mile_sql = `
-        SELECT
-            pu_borough,
-            AVG(fare_per_mile) AS fare_per_mile_mean
-        FROM
-            taxi_2023
-        WHERE
-            pu_borough NOT IN ('Unknown', 'N/A', 'EWR')
-        GROUP BY
-            pu_borough
-    `;
+    const trips_per_borough_pu_data = await taxi.query(generateTripsPerBoroughSQL('pu_borough'));
+    console.log(trips_per_borough_pu_data);
 
-    const mean_fare_per_mile_data = await taxi.query(mean_fare_per_mile_sql);
-    console.log(mean_fare_per_mile_data);
+    const trips_per_borough_do_data = await taxi.query(generateTripsPerBoroughSQL('do_borough'));
+    console.log(trips_per_borough_do_data);
 
-    callbacks(mean_fare_per_minute_data, mean_fare_per_mile_data);
+    callbacks(mean_earn_per_minute_pu_data, mean_earn_per_minute_do_data, trips_per_borough_pu_data, trips_per_borough_do_data);
 };
 
