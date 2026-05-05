@@ -1,3 +1,17 @@
-trabalho-1/d3js e duckdb/package-lock.json
-trabalho-1/d3js e duckdb/node_modules
+node_modules/
+
+.ipynb_checkpoints/
+
+__pycache__/
+*.pyc
+
+*.log
+
+.DS_Store
+Thumbs.db
+
+.vscode/
+.idea/
+
+package-lock.json
 trabalho-1/data/parquet_processado
