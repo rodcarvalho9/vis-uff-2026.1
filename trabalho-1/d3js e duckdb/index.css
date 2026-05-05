@@ -22,11 +22,38 @@ body {
 
 .buttom-container {
     display: flex;
-
     flex-direction: row;
     flex-wrap: nowrap;
     justify-content: center; 
-    align-items: center; 
+    align-items: center;
+    gap: 20px;
+}
+
+.borough-selector {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 5px;
+}
+
+.borough-selector label {
+    font-weight: bold;
+    color: #333;
+}
+
+.borough-selector select {
+    padding: 8px 12px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    background-color: white;
+    font-size: 1em;
+    cursor: pointer;
+}
+
+.borough-selector select:focus {
+    outline: none;
+    border-color: #006A71;
+    box-shadow: 0 0 5px rgba(0, 106, 113, 0.3);
 }
 
 svg {
