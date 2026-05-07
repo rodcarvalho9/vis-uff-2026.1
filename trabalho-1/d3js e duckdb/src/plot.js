@@ -1,6 +1,6 @@
 import * as d3 from 'd3';
 
-export async function loadMeanEarnPerMinuteBarChart(data, svgSelector, borough_type = 'pu_borough', margens = { left: 50, right: 25, top: 50, bottom: 50 }){
+export async function loadEarnPerBoroughBarplot(data, svgSelector, borough_type = 'pu_borough', margens = { left: 50, right: 25, top: 25, bottom: 50 }){
     const svg = d3.select(svgSelector);
 
     if (svg.empty()) {
@@ -10,11 +10,11 @@ export async function loadMeanEarnPerMinuteBarChart(data, svgSelector, borough_t
     const chartData = Array.isArray(data)
         ? data.map(d => ({ 
             borough: d[borough_type], 
-            mean_earn_per_minute: d.mean_earn_per_minute 
+            mean_earn: d.mean_earn 
         }))
-        : Array.from(data, ([borough, mean_earn_per_minute]) => ({ borough: borough, mean_earn_per_minute: mean_earn_per_minute }));
+        : Array.from(data, ([borough, mean_earn]) => ({ borough: borough, mean_earn: mean_earn }));
 
-    chartData.sort((a, b) => d3.descending(a.mean_earn_per_minute, b.mean_earn_per_minute));
+    chartData.sort((a, b) => d3.descending(a.mean_earn, b.mean_earn));
 
     // Declare the x (horizontal position) scale.
     const x = d3.scaleBand()
@@ -24,7 +24,7 @@ export async function loadMeanEarnPerMinuteBarChart(data, svgSelector, borough_t
   
     // Declare the y (vertical position) scale.
     const y = d3.scaleLinear()
-        .domain([0, d3.max(chartData, d => d.mean_earn_per_minute) || 0])
+        .domain([0, d3.max(chartData, d => d.mean_earn) || 0])
         .range([+svg.style("height").split("px")[0] - margens.bottom - margens.top, 0]);
 
     // Create main group for bars with margins
@@ -37,17 +37,20 @@ export async function loadMeanEarnPerMinuteBarChart(data, svgSelector, borough_t
         .join("rect")
         .attr("fill", "steelblue")
         .attr("x", (d) => x(d.borough))
-        .attr("y", (d) => y(d.mean_earn_per_minute))
-        .attr("height", (d) => y(0) - y(d.mean_earn_per_minute))
+        .attr("y", (d) => y(d.mean_earn))
+        .attr("height", (d) => y(0) - y(d.mean_earn))
         .attr("width", x.bandwidth());
 
     // Add the x-axis and label.
     svg.append("g")
         .attr("transform", `translate(${margens.left}, ${+svg.style('height').split('px')[0] - margens.bottom})`)
         .call(d3.axisBottom(x))
+        .call(g => g.selectAll("text")
+            .attr("font-size", "11px")
+            .attr("text-anchor", "middle"))
         .call(g => g.append("text")
             .attr("x", (+svg.style("width").split("px")[0] - margens.left - margens.right) / 2)
-            .attr("y", 40)
+            .attr("y", 45)
             .attr("text-anchor", "middle")
             .attr("fill", "currentColor")
             .attr("font-size", "12px")
@@ -59,17 +62,17 @@ export async function loadMeanEarnPerMinuteBarChart(data, svgSelector, borough_t
         .attr("transform", `translate(${margens.left}, ${margens.top})`)
         .call(d3.axisLeft(y).tickFormat((value) => value.toFixed(2)))
         .call(g => g.append("text")
-            .attr("x", 20)
-            .attr("y", -20)
+            .attr("x", -35)
+            .attr("y", -12)
             .attr("fill", "currentColor")
-            .attr("text-anchor", "middle")
+            .attr("text-anchor", "start")
             .attr("font-size", "12px")
             .attr("font-weight", "bold")
-            .text("Mean Earn per Minute"));
+            .text("Ganho médio"));
 
 }
 
-export async function loadTripsPerBoroughPieChart(data, svgSelector, borough_type = 'pu_borough', margens = { left: 50, right: 25, top: 50, bottom: 50 }){
+export async function loadTripsPerBoroughPieChart(data, svgSelector, borough_type = 'pu_borough', margens = { left: 25, right: 25, top: 25, bottom: 25 }){
     const svg = d3.select(svgSelector);
 
     if (svg.empty()) {
@@ -81,6 +84,15 @@ export async function loadTripsPerBoroughPieChart(data, svgSelector, borough_typ
     const innerWidth = width - margens.left - margens.right;
     const innerHeight = height - margens.top - margens.bottom;
     const radius = Math.min(innerWidth, innerHeight) / 2;
+
+    svg.append("text")
+        .attr("x", width / 2)
+        .attr("y", 12)
+        .attr("text-anchor", "middle")
+        .attr("fill", "currentColor")
+        .attr("font-size", "14px")
+        .attr("font-weight", "bold")
+        .text("Viagens por bairro");
 
     const chartData = Array.isArray(data)
         ? data.map(d => ({
@@ -129,7 +141,7 @@ export async function loadTripsPerBoroughPieChart(data, svgSelector, borough_typ
         .text(d => d.data.borough);
 }
 
-export async function loadMeanEarnPerWeekdayLineChart(data, svgSelector, borough_type = 'pu_borough', margens = { left: 50, right: 25, top: 50, bottom: 50 }){
+export async function loadEarnPerWeekdayLineChart(data, svgSelector, borough_type = 'pu_borough', margens = { left: 50, right: 25, top: 25, bottom: 50 }){
     const svg = d3.select(svgSelector);
 
     if (svg.empty()) {
@@ -151,7 +163,7 @@ export async function loadMeanEarnPerWeekdayLineChart(data, svgSelector, borough
         ? data.map(d => ({
             borough: d[borough_type],
             weekday: weekdayNumberToLabel(d.day_num),
-            mean_earn_per_minute: Number(d.mean_earn_per_minute)
+            mean_earn: Number(d.mean_earn)
         }))
         : [];
 
@@ -168,8 +180,8 @@ export async function loadMeanEarnPerWeekdayLineChart(data, svgSelector, borough
         .range([0, innerWidth])
         .padding(0.4);
 
-    const minEarn = d3.min(chartData, d => d.mean_earn_per_minute) || 0;
-    const maxEarn = d3.max(chartData, d => d.mean_earn_per_minute) || 0;
+    const minEarn = d3.min(chartData, d => d.mean_earn) || 0;
+    const maxEarn = d3.max(chartData, d => d.mean_earn) || 0;
     const yStart = Math.max(0, Math.floor(minEarn));
 
     const y = d3.scaleLinear()
@@ -183,7 +195,7 @@ export async function loadMeanEarnPerWeekdayLineChart(data, svgSelector, borough
 
     const line = d3.line()
         .x(d => x(d.weekday))
-        .y(d => y(d.mean_earn_per_minute));
+        .y(d => y(d.mean_earn));
 
     const mainGroup = svg.append("g")
         .attr("transform", `translate(${margens.left}, ${margens.top})`);
@@ -202,18 +214,21 @@ export async function loadMeanEarnPerWeekdayLineChart(data, svgSelector, borough
         .join("circle")
         .attr("class", "borough-point")
         .attr("cx", d => x(d.weekday))
-        .attr("cy", d => y(d.mean_earn_per_minute))
+        .attr("cy", d => y(d.mean_earn))
         .attr("r", 3)
         .attr("fill", d => color(d.borough))
         .append("title")
-        .text(d => `${d.borough} - ${d.weekday}: ${d.mean_earn_per_minute.toFixed(2)}`);
+        .text(d => `${d.borough} - ${d.weekday}: ${d.mean_earn.toFixed(2)}`);
 
     svg.append("g")
         .attr("transform", `translate(${margens.left}, ${height - margens.bottom})`)
         .call(d3.axisBottom(x))
+        .call(g => g.selectAll("text")
+            .attr("font-size", "11px")
+            .attr("text-anchor", "middle"))
         .call(g => g.append("text")
             .attr("x", innerWidth / 2)
-            .attr("y", 40)
+            .attr("y", 45)
             .attr("text-anchor", "middle")
             .attr("fill", "currentColor")
             .attr("font-size", "12px")
@@ -224,13 +239,13 @@ export async function loadMeanEarnPerWeekdayLineChart(data, svgSelector, borough
         .attr("transform", `translate(${margens.left}, ${margens.top})`)
         .call(d3.axisLeft(y).tickFormat(value => value.toFixed(2)))
         .call(g => g.append("text")
-            .attr("x", 20)
-            .attr("y", -20)
+            .attr("x", -35)
+            .attr("y", -12)
             .attr("fill", "currentColor")
-            .attr("text-anchor", "middle")
+            .attr("text-anchor", "start")
             .attr("font-size", "12px")
             .attr("font-weight", "bold")
-            .text("Mean Earn per Minute"));
+            .text("Ganho médio"));
 
     const legend = svg.append("g")
         .attr("transform", `translate(${margens.left + 10}, ${margens.top + 10})`);
@@ -256,6 +271,121 @@ export async function loadMeanEarnPerWeekdayLineChart(data, svgSelector, borough
         .text(d => d.borough);
 }
 
+export async function loadEarnHeatMap(data, svgSelector, margens = { left: 75, right: 25, top: 25, bottom: 50 }){
+    const svg = d3.select(svgSelector);
+
+    if (svg.empty()) {
+        return;
+    }
+
+    const width = +svg.style("width").split("px")[0];
+    const height = +svg.style("height").split("px")[0];
+    const innerWidth = width - margens.left - margens.right;
+    const innerHeight = height - margens.top - margens.bottom;
+
+    const chartData = Array.isArray(data)
+        ? data.map(d => ({
+            pu_borough: d.pu_borough,
+            do_borough: d.do_borough,
+            mean_earn: Number(d.mean_earn)
+        }))
+        : [];
+
+    const puBoroughs = Array.from(new Set(chartData.map(d => d.pu_borough))).sort();
+    const doBoroughs = Array.from(new Set(chartData.map(d => d.do_borough))).sort();
+    const valuesByRoute = new Map(
+        chartData.map(d => [`${d.pu_borough}|${d.do_borough}`, d.mean_earn])
+    );
+
+    const heatmapData = puBoroughs.flatMap(pu_borough =>
+        doBoroughs.map(do_borough => ({
+            pu_borough,
+            do_borough,
+            mean_earn: valuesByRoute.get(`${pu_borough}|${do_borough}`)
+        }))
+    );
+
+    const x = d3.scaleBand()
+        .domain(doBoroughs)
+        .range([0, innerWidth])
+        .padding(0.04);
+
+    const y = d3.scaleBand()
+        .domain(puBoroughs)
+        .range([0, innerHeight])
+        .padding(0.04);
+
+    const earnValues = chartData
+        .map(d => d.mean_earn)
+        .filter(value => Number.isFinite(value));
+    const minEarn = d3.min(earnValues) || 0;
+    const maxEarn = d3.max(earnValues) || 0;
+
+    const color = d3.scaleSequential()
+        .domain([minEarn, maxEarn])
+        .interpolator(d3.interpolateGreens);
+
+    const mainGroup = svg.append("g")
+        .attr("transform", `translate(${margens.left}, ${margens.top})`);
+
+    mainGroup.selectAll("rect")
+        .data(heatmapData)
+        .join("rect")
+        .attr("x", d => x(d.do_borough))
+        .attr("y", d => y(d.pu_borough))
+        .attr("width", x.bandwidth())
+        .attr("height", y.bandwidth())
+        .attr("fill", d => Number.isFinite(d.mean_earn) ? color(d.mean_earn) : "#f2f2f2")
+        .attr("stroke", "#ffffff")
+        .attr("stroke-width", 2)
+        .append("title")
+        .text(d => {
+            const value = Number.isFinite(d.mean_earn)
+                ? d.mean_earn.toFixed(2)
+                : "sem dados";
+            return `${d.pu_borough} -> ${d.do_borough}: ${value}`;
+        });
+
+    mainGroup.selectAll("text")
+        .data(heatmapData)
+        .join("text")
+        .attr("x", d => x(d.do_borough) + x.bandwidth() / 2)
+        .attr("y", d => y(d.pu_borough) + y.bandwidth() / 2)
+        .attr("text-anchor", "middle")
+        .attr("dominant-baseline", "middle")
+        .attr("fill", d => d.mean_earn > (minEarn + maxEarn) / 2 ? "#ffffff" : "#1f2933")
+        .attr("font-size", "12px")
+        .attr("font-weight", "bold")
+        .text(d => Number.isFinite(d.mean_earn) ? d.mean_earn.toFixed(2) : "");
+
+    svg.append("g")
+        .attr("transform", `translate(${margens.left}, ${margens.top + innerHeight})`)
+        .call(d3.axisBottom(x))
+        .call(g => g.selectAll("text")
+            .attr("font-size", "11px")
+            .attr("text-anchor", "middle"))
+        .call(g => g.append("text")
+            .attr("x", innerWidth / 2)
+            .attr("y", 45)
+            .attr("text-anchor", "middle")
+            .attr("fill", "currentColor")
+            .attr("font-size", "12px")
+            .attr("font-weight", "bold")
+            .text("Bairro de desembarque"));
+
+    svg.append("g")
+        .attr("transform", `translate(${margens.left}, ${margens.top})`)
+        .call(d3.axisLeft(y))
+        .call(g => g.selectAll("text").attr("font-size", "11px"))
+        .call(g => g.append("text")
+            .attr("x", -60)
+            .attr("y", -12)
+            .attr("text-anchor", "start")
+            .attr("fill", "currentColor")
+            .attr("font-size", "12px")
+            .attr("font-weight", "bold")
+            .text("Bairro de embarque"));
+}
 
 export function clearChart(svgSelector = 'svg') {
     d3.select(svgSelector)

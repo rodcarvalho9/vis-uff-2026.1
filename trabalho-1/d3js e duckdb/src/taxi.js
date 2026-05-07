@@ -6,23 +6,24 @@ export class Taxi {
         this.db = await loadDb();
         this.conn = await this.db.connect();
 
-        this.color = "green";
-        this.table = 'taxi_2023';
+        this.table = 'taxi_2025';
+        this.parquetFileName = 'green_tripdata_2025.parquet';
     }
 
     async loadTaxi() {
         if (!this.db || !this.conn)
             throw new Error('Database not initialized. Please call init() first.');
 
-        const url = `/parquet_processado/${this.color}_tripdata_2023.parquet`;
-        const res = await fetch(url);
-        if (!res.ok) throw new Error(`Failed to fetch parquet file: ${res.statusText}`);
-        await this.db.registerFileBuffer('taxi_data', new Uint8Array(await res.arrayBuffer()));
+        const parquetUrl = `${import.meta.env.BASE_URL}parquet_processado/${this.parquetFileName}`;
+        const res = await fetch(parquetUrl);
+
+        const parquetBuffer = new Uint8Array(await res.arrayBuffer());
+        await this.db.registerFileBuffer(this.parquetFileName, parquetBuffer);
 
         await this.conn.query(`
-            CREATE TABLE ${this.table} AS
+            CREATE OR REPLACE TABLE ${this.table} AS
                 SELECT * 
-                FROM read_parquet('taxi_data');
+                FROM read_parquet('${this.parquetFileName}');
         `);
     }
 
