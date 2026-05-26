@@ -1,16 +1,63 @@
+/* Reset básico e fonte padrão */
 body {
     margin: 20px;
-
     font-family: 'Times New Roman', Times, serif;
     font-size: 1.25em;
-  }
+}
 
+/* Container principal empilha os blocos verticalmente */
 .main-container {
     display: flex;
     flex-direction: column;
     gap: 20px;
 }
 
+/* Barra de toggles no topo */
+.controls-bar {
+    display: flex;
+    flex-direction: row;
+    gap: 30px;
+    align-items: center;
+    background-color: #efefef;
+    padding: 12px 20px;
+    border-radius: 8px;
+}
+
+/* Grupo de toggle (label + botões) */
+.toggle-group {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+}
+
+.toggle-label {
+    font-weight: bold;
+    font-size: 0.9em;
+    color: #333;
+}
+
+/* Botão de toggle inativo */
+.toggle-btn {
+    padding: 6px 14px;
+    border: 1px solid #999;
+    border-radius: 4px;
+    background-color: #ffffff;
+    font-family: 'Times New Roman', Times, serif;
+    font-size: 0.85em;
+    cursor: pointer;
+    transition: background-color 0.2s, color 0.2s;
+}
+
+/* Botão de toggle ativo */
+.toggle-btn.active {
+    background-color: #2c6fad;
+    color: #ffffff;
+    border-color: #2c6fad;
+    font-weight: bold;
+}
+
+/* Grid 2x2 para os 4 gráficos principais */
 .charts-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -20,42 +67,25 @@ body {
     border-radius: 8px;
 }
 
+/* Linha única para o ridgeline */
+.charts-grid-single {
+    display: grid;
+    grid-template-columns: 1fr;
+    background-color: #efefef;
+    padding: 20px;
+    border-radius: 8px;
+}
+
+/* Botões Load/Clear centralizados */
 .buttom-container {
     display: flex;
     flex-direction: row;
-    flex-wrap: nowrap;
-    justify-content: center; 
+    justify-content: center;
     align-items: center;
     gap: 20px;
 }
 
-.borough-selector {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 5px;
-}
-
-.borough-selector label {
-    font-weight: bold;
-    color: #333;
-}
-
-.borough-selector select {
-    padding: 8px 12px;
-    border: 1px solid #ccc;
-    border-radius: 4px;
-    background-color: white;
-    font-size: 1em;
-    cursor: pointer;
-}
-
-.borough-selector select:focus {
-    outline: none;
-    border-color: #006A71;
-    box-shadow: 0 0 5px rgba(0, 106, 113, 0.3);
-}
-
+/* Estilo padrão dos SVGs */
 svg {
     background-color: #ffffff;
     border-radius: 8px;
@@ -65,10 +95,9 @@ svg {
     display: block;
 }
 
-circle {
-    stroke: #006A71;
-    stroke-width: "3";
-    fill: #9ACBD0;
+/* Ridgeline precisa de mais altura */
+#chart-ridgeline {
+    height: 480px;
 }
 
 button {

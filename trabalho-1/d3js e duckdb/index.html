@@ -3,22 +3,49 @@
 
 <head>
     <meta charset="UTF-8">
-    <title>Carregamento dos Dados</title>
+    <title>Táxi NYC — Redesign TaxiVis</title>
     <link rel="stylesheet" href="index.css">
 </head>
 
 <body>
     <div class="main-container">
+
+        <!-- Barra de controles: toggles de interação -->
+        <div class="controls-bar">
+            <!-- Toggle embarque ↔ desembarque -->
+            <div class="toggle-group">
+                <span class="toggle-label">Distrito:</span>
+                <button id="btn-pu" class="toggle-btn active">Embarque</button>
+                <button id="btn-do" class="toggle-btn">Desembarque</button>
+            </div>
+
+            <!-- Toggle métrica: ganho/min ↔ ganho/distância -->
+            <div class="toggle-group">
+                <span class="toggle-label">Métrica:</span>
+                <button id="btn-min" class="toggle-btn active">Ganho / min</button>
+                <button id="btn-dist" class="toggle-btn">Ganho / km</button>
+            </div>
+        </div>
+
+        <!-- Grid 2x2 com os 4 gráficos principais -->
         <div class="charts-grid">
             <svg id="chart-earn-per-borough"></svg>
             <svg id="chart-trips-per-borough"></svg>
             <svg id="chart-earn-per-weekday"></svg>
             <svg id="chart-earn-heatmap"></svg>
         </div>
+
+        <!-- Ridgeline sozinho na largura total -->
+        <div class="charts-grid-single">
+            <svg id="chart-ridgeline"></svg>
+        </div>
+
+        <!-- Botões de carregar e limpar -->
         <div class="buttom-container">
             <button id="loadBtn">Load Chart</button>
             <button id="clearBtn">Clear Chart</button>
         </div>
+
     </div>
 
     <script type="module" src="src/main.js"></script>
