@@ -1,7 +1,6 @@
 import * as d3 from 'd3';
 
 // Paleta categórica consistente para os 4 distritos em todos os gráficos.
-// Tableau10 é perceptualmente distinta e amigável para daltônicos (Munzner, aula 11).
 // A mesma cor sempre representa o mesmo distrito independente do gráfico.
 const BOROUGH_COLORS = d3.scaleOrdinal()
     .domain(['Bronx', 'Brooklyn', 'Manhattan', 'Queens'])
@@ -9,8 +8,6 @@ const BOROUGH_COLORS = d3.scaleOrdinal()
 
 // ─── 1. BAR CHART — Ganho médio por distrito ───────────────────────────────────
 // Tarefa: identificar qual distrito oferece maior retorno por minuto (ou km).
-// Canal: posição em eixo comum (eficácia máxima para quantitativos, Munzner).
-// Cor categórica consistente com os demais gráficos.
 export async function loadEarnPerBoroughBarplot(data, svgSelector, borough_type = 'pu_borough', metricLabel = 'US$/min', margens = { left: 55, right: 25, top: 40, bottom: 50 }) {
     const svg = d3.select(svgSelector);
     if (svg.empty()) return;
@@ -86,8 +83,7 @@ export async function loadEarnPerBoroughBarplot(data, svgSelector, borough_type 
 }
 
 // ─── 2. BAR CHART HORIZONTAL — Total de viagens por distrito ───────────────────
-// Substitui o pie chart original.
-// Justificativa Munzner: posição em eixo comum tem maior eficácia que ângulo.
+// Tarefa: identificar quais distritos têm maior volume de corridas.
 export async function loadTripsPerBoroughBarChart(data, svgSelector, borough_type = 'pu_borough', margens = { left: 90, right: 60, top: 40, bottom: 50 }) {
     const svg = d3.select(svgSelector);
     if (svg.empty()) return;
@@ -125,7 +121,6 @@ export async function loadTripsPerBoroughBarChart(data, svgSelector, borough_typ
         .attr("y", d => y(d.borough)).attr("x", 0)
         .attr("height", y.bandwidth())
         .attr("width", d => x(d.total_viagens))
-        // Cor categórica consistente com os demais gráficos
         .attr("fill", d => BOROUGH_COLORS(d.borough))
         .append("title")
         .text(d => `${d.borough}: ${d.total_viagens.toLocaleString()} viagens`);
@@ -157,8 +152,6 @@ export async function loadTripsPerBoroughBarChart(data, svgSelector, borough_typ
 
 // ─── 3. LINE CHART — Ganho médio por dia da semana ───────────────────────────
 // Tarefa: comparar variação de lucratividade ao longo da semana entre distritos.
-// Canal: posição Y (ganho) + matiz consistente com BOROUGH_COLORS.
-// Insight: Brooklyn sobe no fim de semana, Bronx cai na segunda-feira.
 export async function loadEarnPerWeekdayLineChart(data, svgSelector, borough_type = 'pu_borough', metricLabel = 'US$/min', margens = { left: 55, right: 110, top: 40, bottom: 50 }) {
     const svg = d3.select(svgSelector);
     if (svg.empty()) return;
@@ -267,9 +260,7 @@ export async function loadEarnPerWeekdayLineChart(data, svgSelector, borough_typ
 
 // ─── 4. HEATMAP — Ganho médio por par embarque → desembarque ─────────────────
 // Tarefa: identificar quais trajetos são mais lucrativos para o taxista.
-// Escala sequencial de cores (luminância): azul mais escuro = ganho maior.
-// Escala divergente seria mais adequada se houvesse um ponto médio de referência,
-// mas aqui todos os valores são positivos, então sequencial é a escolha correta.
+// Escala sequencial de cores: azul mais escuro = ganho maior.
 export async function loadEarnHeatMap(data, svgSelector, metricLabel = 'US$/min', margens = { left: 75, right: 25, top: 40, bottom: 50 }) {
     const svg = d3.select(svgSelector);
     if (svg.empty()) return;
@@ -292,7 +283,6 @@ export async function loadEarnHeatMap(data, svgSelector, metricLabel = 'US$/min'
     const puBoroughs = Array.from(new Set(chartData.map(d => d.pu_borough))).sort();
     const doBoroughs = Array.from(new Set(chartData.map(d => d.do_borough))).sort();
 
-    // Indexa por chave composta para lookup O(1)
     const valuesByRoute = new Map(chartData.map(d => [`${d.pu_borough}|${d.do_borough}`, d.mean_earn]));
 
     const heatmapData = puBoroughs.flatMap(pu =>
@@ -309,7 +299,6 @@ export async function loadEarnHeatMap(data, svgSelector, metricLabel = 'US$/min'
     const minEarn = d3.min(earnValues) || 0;
     const maxEarn = d3.max(earnValues) || 0;
 
-    // Escala sequencial: todos os valores são positivos, luminância é suficiente
     const color = d3.scaleSequential()
         .domain([minEarn, maxEarn])
         .interpolator(d3.interpolateBlues); // azul claro → azul escuro
@@ -402,7 +391,6 @@ export async function loadEarnHeatMap(data, svgSelector, metricLabel = 'US$/min'
 // Tarefa: identificar horários de pico de lucratividade em cada distrito.
 // Escala Y local por distrito: cada curva usa sua própria amplitude mínima/máxima,
 // evitando que distritos com menor variação apareçam achatados.
-// Cores consistentes com BOROUGH_COLORS — mesma cor do mesmo distrito em todos os gráficos.
 export async function loadEarnRidgeline(data, svgSelector, borough_type = 'pu_borough', metricLabel = 'US$/min', margens = { left: 110, right: 25, top: 40, bottom: 50 }) {
     const svg = d3.select(svgSelector);
     if (svg.empty()) return;

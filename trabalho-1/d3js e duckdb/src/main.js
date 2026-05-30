@@ -148,7 +148,6 @@ function generateEarnPerWeekdaySQL(boroughType = 'pu_borough', metric = 'min') {
 }
 
 // Ganho médio por par embarque → desembarque (heatmap)
-// COALESCE garante 0 quando não há gorjeta registrada
 function generateEarnHeatMapSQL(metric = 'min') {
     const divisor = metric === 'min'
         ? 'trip_duration_minutes'
@@ -163,7 +162,7 @@ function generateEarnHeatMapSQL(metric = 'min') {
         )
         SELECT
             pu_borough, do_borough,
-            AVG(base_earn) + COALESCE(AVG(tip_earn), 0) AS mean_earn
+            AVG(base_earn) + AVG(tip_earn) AS mean_earn
         FROM metric
         GROUP BY pu_borough, do_borough
         ORDER BY pu_borough, do_borough
@@ -180,13 +179,14 @@ function generateRidgelineSQL(boroughType = 'pu_borough', metric = 'min') {
             SELECT
                 ${boroughType},
                 CAST(strftime(lpep_pickup_datetime, '%H') AS INTEGER) AS hour,
-                (fare_amount + extra + tip_amount) / (${divisor}) AS earn
+                (fare_amount + extra) / (${divisor}) AS base_earn,
+                tip_amount / (${divisor}) AS tip_earn
             FROM taxi_2025
         )
         SELECT
             ${boroughType},
             hour,
-            AVG(earn) AS mean_earn
+            AVG(base_earn) + AVG(tip_earn) AS mean_earn
         FROM metric
         GROUP BY ${boroughType}, hour
         ORDER BY ${boroughType}, hour
