@@ -13,6 +13,6 @@ Thumbs.db
 .vscode/
 .idea/
 
+trabalho-1/data/green
 package-lock.json
-trabalho-1/data/parquet_processado
 dist/
