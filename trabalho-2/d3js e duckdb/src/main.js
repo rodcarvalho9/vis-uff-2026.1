@@ -1,12 +1,12 @@
-import { loadMap, clearMap, initCrime, CRIME_TYPES } from './map';
+import { loadMap, clearMap, CRIME_TYPES, initDbs, getAvailableYears } from './map';
 
-function callbacks(data) {
-    const loadBtn   = document.querySelector('#loadBtn');
-    const clearBtn  = document.querySelector('#clearBtn');
+async function callbacks(data) {
+    const loadBtn = document.querySelector('#loadBtn');
+    const clearBtn = document.querySelector('#clearBtn');
     const metricSelect = document.querySelector('#crimeMetric');
-    const toggleGroups = document.querySelectorAll('.toggle-group');
+    const yearSelect = document.querySelector('#yearSelect');
 
-    if (!loadBtn || !clearBtn || !metricSelect) {
+    if (!loadBtn || !clearBtn || !metricSelect || !yearSelect) {
         return;
     }
 
@@ -19,21 +19,33 @@ function callbacks(data) {
 
     metricSelect.value = 'furto_celular';
 
-    toggleGroups.forEach(group => {
-        group.querySelectorAll('.toggle-btn').forEach(button => {
-            button.addEventListener('click', () => {
-                group.querySelectorAll('.toggle-btn').forEach(d => d.classList.remove('active'));
-                button.classList.add('active');
-            });
-        });
+    const years = await getAvailableYears();
+    const defaultYear = years[years.length - 1] || new Date().getFullYear();
+
+    yearSelect.innerHTML = '';
+    years.forEach(year => {
+        const option = document.createElement('option');
+        option.value = String(year);
+        option.textContent = String(year);
+        yearSelect.appendChild(option);
     });
 
+    yearSelect.value = String(defaultYear);
+
+    await loadMap(data, metricSelect.value, defaultYear);
+
     loadBtn.addEventListener('click', async () => {
-        await loadMap(data, metricSelect.value);
+        const activeYear = yearSelect.value || defaultYear;
+        await loadMap(data, metricSelect.value, activeYear);
     });
 
     metricSelect.addEventListener('change', async () => {
-        await loadMap(data, metricSelect.value);
+        const activeYear = yearSelect.value || defaultYear;
+        await loadMap(data, metricSelect.value, activeYear);
+    });
+
+    yearSelect.addEventListener('change', async () => {
+        await loadMap(data, metricSelect.value, yearSelect.value);
     });
 
     clearBtn.addEventListener('click', async () => {
@@ -45,7 +57,7 @@ window.onload = async () => {
     const response = await fetch('RJ_Municipios_2025.geojson');
     const neighs = await response.json();
 
-    callbacks(neighs);
-    await initCrime();
+    await initDbs();
+    await callbacks(neighs);
 };
 

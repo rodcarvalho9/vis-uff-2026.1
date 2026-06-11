@@ -12,9 +12,8 @@
         <!-- Barra de controles: toggles de interacao -->
         <div class="controls-bar">
             <div class="toggle-group">
-                <span class="toggle-label">Municipio:</span>
-                <button id="btn-total" class="toggle-btn active">Total</button>
-                <button id="btn-rate" class="toggle-btn">Por 10 mil hab.</button>
+                <span class="toggle-label">Ano:</span>
+                <select id="yearSelect" class="metric-select"></select>
             </div>
 
             <div class="toggle-group">
@@ -25,8 +24,14 @@
 
         <!-- Janelas para SVGs -->
         <div class="charts-grid">
-            <svg id="chart-map"></svg>
-            <svg id="chart-secondary"></svg>
+            <div class="map-column">
+                <svg id="chart-map"></svg>
+                <svg id="chart-line"></svg>
+            </div>
+            <div class="side-charts">
+                <svg id="chart-secondary"></svg>
+                <svg id="chart-tertiary"></svg>
+            </div>
         </div>
 
         <div class="buttom-container">

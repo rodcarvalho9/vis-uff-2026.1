@@ -1,19 +1,18 @@
-
 import { loadDb } from './config';
 
-export class Crime {
+export class Populacao {
     async init() {
         this.db = await loadDb();
         this.conn = await this.db.connect();
 
-        this.table = 'crime_rj';
+        this.table = 'populacao_rj';
     }
 
-    async loadCrime(csvUrl = 'BaseMunicipioMensal_2014_2025.csv') {
+    async loadPopulacao(csvUrl = 'populacao_rj.csv') {
         if (!this.db || !this.conn)
             throw new Error('Database not initialized. Please call init() first.');
 
-        const fileKey = 'crime_csv';
+        const fileKey = 'populacao_csv';
         const res = await fetch(csvUrl);
 
         if (!res.ok) {
@@ -47,7 +46,7 @@ export class Crime {
             throw new Error('Database not initialized. Please call init() first.');
 
         const sql = `
-                SELECT * 
+                SELECT *
                 FROM ${this.table}
                 LIMIT ${limit}
             `;

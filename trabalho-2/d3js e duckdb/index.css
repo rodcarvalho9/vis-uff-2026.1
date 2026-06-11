@@ -37,6 +37,12 @@ body {
     color: #333;
 }
 
+.toggle-buttons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
 /* Botao de toggle inativo */
 .toggle-btn {
     padding: 6px 14px;
@@ -67,7 +73,7 @@ body {
     cursor: pointer;
 }
 
-/* Grid com mapa e grafico secundario */
+/* Grid com mapa e graficos laterais */
 .charts-grid {
     display: grid;
     grid-template-columns: minmax(0, 2fr) minmax(320px, 1fr);
@@ -75,6 +81,18 @@ body {
     background-color: #efefef;
     padding: 20px;
     border-radius: 8px;
+}
+
+.map-column {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+
+.side-charts {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
 }
 
 /* Botoes Load/Clear centralizados */
@@ -100,8 +118,14 @@ svg {
     height: 560px;
 }
 
-#chart-secondary {
-    height: 420px;
+#chart-secondary,
+#chart-tertiary {
+    height: 268px;
+    align-self: start;
+}
+
+#chart-line {
+    height: 220px;
     align-self: start;
 }
 
