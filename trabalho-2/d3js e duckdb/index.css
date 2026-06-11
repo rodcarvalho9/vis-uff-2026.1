@@ -1,0 +1,110 @@
+/* Reset basico e fonte padrao */
+body {
+    margin: 20px;
+    font-family: 'Times New Roman', Times, serif;
+    font-size: 1.25em;
+}
+
+/* Container principal empilha os blocos verticalmente */
+.main-container {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+
+/* Barra de toggles no topo */
+.controls-bar {
+    display: flex;
+    flex-direction: row;
+    gap: 30px;
+    align-items: center;
+    background-color: #efefef;
+    padding: 12px 20px;
+    border-radius: 8px;
+}
+
+/* Grupo de toggle (label + botoes) */
+.toggle-group {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+}
+
+.toggle-label {
+    font-weight: bold;
+    font-size: 0.9em;
+    color: #333;
+}
+
+/* Botao de toggle inativo */
+.toggle-btn {
+    padding: 6px 14px;
+    border: 1px solid #999;
+    border-radius: 4px;
+    background-color: #ffffff;
+    font-family: 'Times New Roman', Times, serif;
+    font-size: 0.85em;
+    cursor: pointer;
+    transition: background-color 0.2s, color 0.2s;
+}
+
+/* Botao de toggle ativo */
+.toggle-btn.active {
+    background-color: #2c6fad;
+    color: #ffffff;
+    border-color: #2c6fad;
+    font-weight: bold;
+}
+
+.metric-select {
+    padding: 6px 14px;
+    border: 1px solid #999;
+    border-radius: 4px;
+    background-color: #ffffff;
+    font-family: 'Times New Roman', Times, serif;
+    font-size: 0.85em;
+    cursor: pointer;
+}
+
+/* Grid com mapa e grafico secundario */
+.charts-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 2fr) minmax(320px, 1fr);
+    gap: 20px;
+    background-color: #efefef;
+    padding: 20px;
+    border-radius: 8px;
+}
+
+/* Botoes Load/Clear centralizados */
+.buttom-container {
+    display: flex;
+    flex-direction: row;
+    justify-content: center;
+    align-items: center;
+    gap: 20px;
+}
+
+/* Estilo padrao dos SVGs */
+svg {
+    background-color: #ffffff;
+    border-radius: 8px;
+    border: #bfbfbf solid 1px;
+    height: 420px;
+    width: 100%;
+    display: block;
+}
+
+#chart-map {
+    height: 560px;
+}
+
+#chart-secondary {
+    height: 420px;
+    align-self: start;
+}
+
+button {
+    margin: 10px;
+}

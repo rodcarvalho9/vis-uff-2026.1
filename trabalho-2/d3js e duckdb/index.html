@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Carregamento dos Dados</title>
+    <link rel="stylesheet" href="index.css">
+</head>
+
+<body>
+    <div class="main-container">
+        <!-- Barra de controles: toggles de interacao -->
+        <div class="controls-bar">
+            <div class="toggle-group">
+                <span class="toggle-label">Municipio:</span>
+                <button id="btn-total" class="toggle-btn active">Total</button>
+                <button id="btn-rate" class="toggle-btn">Por 10 mil hab.</button>
+            </div>
+
+            <div class="toggle-group">
+                <span class="toggle-label">Metrica:</span>
+                <select id="crimeMetric" class="metric-select"></select>
+            </div>
+        </div>
+
+        <!-- Janelas para SVGs -->
+        <div class="charts-grid">
+            <svg id="chart-map"></svg>
+            <svg id="chart-secondary"></svg>
+        </div>
+
+        <div class="buttom-container">
+            <button id="loadBtn">Load Chart</button>
+            <button id="clearBtn">Clear Chart</button>
+        </div>
+    </div>
+
+    <script type="module" src="src/main.js"></script>
+</body>
+
+</html>
