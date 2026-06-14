@@ -1,46 +1,88 @@
 <!DOCTYPE html>
-<html lang="en">
-
+<html lang="pt-BR">
 <head>
     <meta charset="UTF-8">
-    <title>Carregamento dos Dados</title>
+    <title>Criminalidade RJ – Visualização Interativa</title>
     <link rel="stylesheet" href="index.css">
 </head>
-
 <body>
+    <!-- Overlay exibido enquanto DuckDB e os CSVs inicializam -->
+    <div id="loading-overlay">
+        <div class="loading-spinner"></div>
+        <p>Carregando dados...</p>
+    </div>
+
     <div class="main-container">
-        <!-- Barra de controles: toggles de interacao -->
+        <!-- Cabeçalho: identidade visual do projeto (única área "decorada") -->
+        <header class="app-header">
+            <div class="header-text">
+                <h1>Criminalidade no Estado do Rio de Janeiro</h1>
+                <p class="header-sub">Exploração interativa por município · 2014–2025</p>
+            </div>
+            <div class="header-meta">
+                <span class="header-badge">92 municípios</span>
+                <span class="header-badge">6 tipos de crime</span>
+                <span class="header-source">Fonte: ISP-RJ</span>
+            </div>
+        </header>
+
+        <!-- Barra de controles -->
         <div class="controls-bar">
             <div class="toggle-group">
-                <span class="toggle-label">Ano:</span>
-                <select id="yearSelect" class="metric-select"></select>
+                <span class="toggle-label">Valores:</span>
+                <button id="btn-rate" class="toggle-btn">Por 10 mil hab.</button>
+                <button id="btn-total" class="toggle-btn active">Total</button>
             </div>
-
             <div class="toggle-group">
-                <span class="toggle-label">Metrica:</span>
-                <select id="crimeMetric" class="metric-select"></select>
+                <span class="toggle-label">Tipo de Crime:</span>
+                <!-- Combobox pesquisável: input com lupa + lista filtrável -->
+                <div id="metric-combo" class="metric-combo">
+                    <span class="search-icon" aria-hidden="true">&#128269;</span>
+                    <input id="metricSearch" class="metric-search-input" type="text"
+                           placeholder="Buscar tipo de crime..." autocomplete="off"
+                           role="combobox" aria-expanded="false" aria-controls="metric-list">
+                    <ul id="metric-list" class="metric-list" role="listbox"></ul>
+                </div>
             </div>
+            <div class="toggle-group">
+                <span class="toggle-label">Agregação:</span>
+                <button id="btn-municipio" class="toggle-btn active">Município</button>
+                <button id="btn-regiao" class="toggle-btn">Região</button>
+            </div>
+            <div class="toggle-group">
+                <span class="toggle-label">Período:</span>
+                <select id="yearFrom" class="metric-select"></select>
+                <span class="toggle-label">até</span>
+                <select id="yearTo" class="metric-select"></select>
+            </div>
+            <div class="hint">Clique em um município ou região para detalhes →</div>
         </div>
 
-        <!-- Janelas para SVGs -->
+        <!-- Grade principal: coluna do mapa (esq.) + coluna de gráficos (dir.) -->
         <div class="charts-grid">
+            <!-- Coluna esquerda: Overview (mapa) + série histórica (when) -->
             <div class="map-column">
                 <svg id="chart-map"></svg>
-                <svg id="chart-line"></svg>
+                <!-- Linked view temporal: aparece após o 1º clique -->
+                <div id="timeline-container" style="display:none;">
+                    <svg id="chart-timeline"></svg>
+                </div>
             </div>
+
+            <!-- Coluna direita: Details on Demand -->
             <div class="side-charts">
-                <svg id="chart-secondary"></svg>
-                <svg id="chart-tertiary"></svg>
+                <!-- Tipos de crime do município selecionado -->
+                <svg id="chart-sidebar"></svg>
+                <!-- Top 5 municípios para o tipo/período selecionados -->
+                <svg id="chart-top-mun"></svg>
             </div>
         </div>
 
-        <div class="buttom-container">
-            <button id="loadBtn">Load Chart</button>
-            <button id="clearBtn">Clear Chart</button>
+        <div class="bottom-container">
+            <button id="clearBtn">Limpar seleção</button>
         </div>
     </div>
 
     <script type="module" src="src/main.js"></script>
 </body>
-
 </html>

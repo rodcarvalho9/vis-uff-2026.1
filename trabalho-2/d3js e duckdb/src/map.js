@@ -1,583 +1,846 @@
+// ════════════════════════════════════════════════════════════════════════
+// map.js — Renderização e interação de todas as visões (camada de visualização)
+//
+// Concentra o desenho com D3.js das quatro visões coordenadas:
+//   • Mapa coroplético (Overview)        → renderMap()
+//   • Tipos de crime do município       → renderTopCrimesChart() + drawBarChart()
+//   • Top 5 municípios do tipo          → renderTopMunChart()    + drawBarChart()
+//   • Série histórica mensal (timeline)  → renderTimeline()
+//
+// Três responsabilidades técnicas recorrentes neste arquivo:
+//   1. CÁLCULO DE ESCALAS — mapear valores de dados para canais visuais
+//      (cor, posição, comprimento) via d3.scale*.
+//   2. ATUALIZAÇÃO DO DOM — usar o padrão data join do D3
+//      (selectAll().data().join()) para criar/atualizar/remover elementos SVG.
+//   3. COORDENAÇÃO — toda interação volta ao estado global (em main.js) e
+//      dispara um novo render, mantendo as visões sincronizadas.
+// ════════════════════════════════════════════════════════════════════════
 import * as d3 from 'd3';
-import { Crime } from './crime';
-import { Populacao } from './populacao';
+import { Database } from './database';
 
-const crime = new Crime();
-const populacao = new Populacao();
+// ── Singletons de módulo ───────────────────────────────────────────────────
+const db = new Database();
+let geojson = null;
+let crimeTypeMap = new Map();
+export const CRIME_TYPES = [];
 
-let selectedMunicipality = null;
-let selectedMunicipalityName = null;
+// Escopo selecionado no mapa; null = nenhum
+let selectedScope = null; // { kind: 'municipio'|'regiao', code: string, name: string }
+let municipalityRegionLookup = new Map();
 
-export const CRIME_TYPES = [
-    'hom_doloso',
-    'lesao_corp_morte',
-    'latrocinio',
-    'cvli',
-    'hom_por_interv_policial',
-    'feminicidio',
-    'letalidade_violenta',
-    'tentat_hom',
-    'tentativa_feminicidio',
-    'lesao_corp_dolosa',
-    'estupro',
-    'hom_culposo',
-    'lesao_corp_culposa',
-    'roubo_transeunte',
-    'roubo_celular',
-    'roubo_em_coletivo',
-    'roubo_rua',
-    'roubo_veiculo',
-    'roubo_carga',
-    'roubo_comercio',
-    'roubo_residencia',
-    'roubo_banco',
-    'roubo_cx_eletronico',
-    'roubo_conducao_saque',
-    'roubo_apos_saque',
-    'roubo_bicicleta',
-    'outros_roubos',
-    'furto_veiculos',
-    'furto_transeunte',
-    'furto_coletivo',
-    'furto_celular',
-    'furto_bicicleta',
-    'outros_furtos',
-    'sequestro',
-    'extorsao',
-    'sequestro_relampago',
-    'estelionato',
-    'apreensao_drogas',
-    'posse_drogas',
-    'trafico_drogas',
-    'ameaca'
-];
+// Parâmetros do último render — permitem que interações disparadas pelos
+// gráficos secundários (cliques em barras, brush) reconstruam as views sem
+// precisar reconsultar o estado global de main.js.
+let current = { metric: null, useRate: false, yearFrom: null, yearTo: null, aggregation: 'municipio' };
 
-export async function initDbs() {
-    console.log('Initializing data...');
-    await crime.init();
-    await crime.loadCrime();
+// Callbacks registrados por main.js para fechar o ciclo de Linked Views:
+// uma interação num gráfico altera o estado global, que re-renderiza tudo.
+let handlers = { onMetricPick: null, onPeriodPick: null };
+export function setInteractionHandlers(h) { handlers = { ...handlers, ...h }; }
 
-    await populacao.init();
-    await populacao.loadPopulacao();
+// ── Inicialização ──────────────────────────────────────────────────────────
+export async function initData(geoData) {
+    geojson = geoData;
+    await db.init();
+    // Carrega as tabelas de crimes, população e mapeamento por tipo de crime
+    await Promise.all([db.loadCrime(), db.loadPopulacao(), db.loadTipoCrime()]);
 
-    console.log('Data initialized');
+    const typeRows = await db.query('SELECT variavel, tipo FROM tipo_crime');
+    buildCrimeTypeMap(typeRows);
+
+    const regionRows = await db.query('SELECT DISTINCT fmun_cod, regiao FROM crime_rj');
+    municipalityRegionLookup = new Map(regionRows.map(({ fmun_cod, regiao }) => [String(fmun_cod), regiao]));
 }
 
-export async function getAvailableYears() {
-    const years = await crime.query('SELECT DISTINCT ano FROM crime_rj ORDER BY ano');
-    return years.map(item => Number(item.ano)).filter(Boolean);
+// ── Helpers de query ───────────────────────────────────────────────────────
+
+function buildCrimeTypeMap(rows) {
+    const grouped = new Map();
+    rows.forEach(({ variavel, tipo }) => {
+        if (!grouped.has(tipo)) grouped.set(tipo, []);
+        grouped.get(tipo).push(variavel);
+    });
+
+    const orderedLabels = [
+        'Crimes Violentos',
+        'Crimes de Trânsito',
+        'Roubos',
+        'Furtos',
+        'Extorsão e Estelionato',
+        'Drogas'
+    ];
+
+    crimeTypeMap = new Map();
+    const labels = orderedLabels.filter(label => grouped.has(label));
+    labels.forEach(label => crimeTypeMap.set(label, grouped.get(label)));
+
+    CRIME_TYPES.splice(0, CRIME_TYPES.length, ...labels);
 }
 
-export async function loadMap(geojson, metric = 'furto_celular', year = null, margens = { left: 5, right: 5, top: 5, bottom: 5 }) {
-    const svg = d3.select('#chart-map');
+function buildCrimeTypeSumExpr(typeLabel, alias = 'c') {
+    const columns = crimeTypeMap.get(typeLabel) ?? [];
+    if (!columns.length) return '0';
+    return columns.map(col => `COALESCE(${alias}.${col}, 0)`).join(' + ');
+}
 
-    if (svg.empty()) {
-        console.log('SVG element not found');
-        return;
+// Para o modo taxa, calcula a média anual das taxas por 10k no período.
+// Usar AVG de taxas anuais é mais correto do que somar crimes e dividir por
+// uma única população, evitando distorção em períodos multi-anuais.
+function rateExpr(metric, useRate) {
+    if (!useRate) return `SUM(c.${metric})`;
+    return `
+        AVG(year_rate) FROM (
+            SELECT c2.fmun_cod,
+                   SUM(c2.${metric}) * 10000.0 / NULLIF(MAX(p2.populacao), 0) AS year_rate
+            FROM crime_rj c2
+            LEFT JOIN populacao_rj p2 ON c2.fmun_cod = p2.fmun_cod AND c2.ano = p2.ano
+    `;
+}
+
+// Wrapper genérico para queries — centraliza o tratamento de erros
+async function q(sql) {
+    return db.query(sql);
+}
+
+function convexHull(points) {
+    const cleaned = points
+        .map(([x, y]) => [x, y])
+        .filter(([x, y]) => Number.isFinite(x) && Number.isFinite(y));
+
+    if (cleaned.length < 3) {
+        return {
+            type: 'Polygon',
+            coordinates: [cleaned.length ? [cleaned[0], cleaned[0]] : []]
+        };
     }
 
-    // ---- Tamanho do Gráfico
-    const width = +svg.node().getBoundingClientRect().width - margens.left - margens.right;
-    const height = +svg.node().getBoundingClientRect().height - margens.top - margens.bottom;
+    const sorted = [...cleaned].sort((a, b) => (a[0] - b[0]) || (a[1] - b[1]));
+    const lower = [];
+    for (const point of sorted) {
+        while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], point) <= 0) {
+            lower.pop();
+        }
+        lower.push(point);
+    }
 
-    const selectedYear = year || (await getAvailableYears()).at(-1) || new Date().getFullYear();
-    const data = await queryCrimeData(metric, selectedYear);
-    const intData = data.map(d => ({
-        fmun_cod: String(d.fmun_cod),
-        value: Number(d.value)
+    const upper = [];
+    for (let i = sorted.length - 1; i >= 0; i--) {
+        const point = sorted[i];
+        while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], point) <= 0) {
+            upper.pop();
+        }
+        upper.push(point);
+    }
+
+    const hull = lower.slice(0, -1).concat(upper.slice(0, -1));
+    if (hull.length < 3) return { type: 'Polygon', coordinates: [[...hull, hull[0]]] };
+
+    return {
+        type: 'Polygon',
+        coordinates: [[...hull, hull[0]]]
+    };
+}
+
+function cross(a, b, c) {
+    return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+}
+
+function buildRegionGeometry(regionFeatures) {
+    const polygons = regionFeatures.flatMap(feature => {
+        const geometry = feature.geometry;
+        if (!geometry) return [];
+        if (geometry.type === 'Polygon') return [geometry.coordinates];
+        if (geometry.type === 'MultiPolygon') return geometry.coordinates;
+        return [];
+    });
+
+    if (polygons.length) {
+        return { type: 'MultiPolygon', coordinates: polygons };
+    }
+
+    const points = regionFeatures.map(feature => d3.geoCentroid(feature));
+    return convexHull(points);
+}
+
+function buildMapFeatures(features, aggregation) {
+    if (aggregation !== 'regiao') return features;
+
+    const grouped = new Map();
+    features.forEach(feature => {
+        const region = municipalityRegionLookup.get(String(feature.properties.CD_MUN));
+        if (!region) return;
+        if (!grouped.has(region)) grouped.set(region, []);
+        grouped.get(region).push(feature);
+    });
+
+    return Array.from(grouped.entries()).map(([region, regionFeatures]) => ({
+        type: 'Feature',
+        properties: {
+            CD_MUN: region,
+            NM_MUN: region,
+            region
+        },
+        geometry: buildRegionGeometry(regionFeatures)
     }));
+}
 
-    const maxValue = d3.max(intData, d => d.value) || 0;
-    const colorScale = d3.scaleLinear()
-        .domain([0, maxValue || 1])
-        .range(['#f7f7f7', '#b30000']);
+// ── Mapa coroplético (Overview) ────────────────────────────────────────────
+export async function renderMap(metric, useRate, yearFrom, yearTo, aggregation = 'municipio') {
+    const svg = d3.select('#chart-map');
+    if (svg.empty() || !geojson) return;
 
-    let projection = d3.geoMercator().
-        fitExtent([[0, 0], [width, height]], geojson);
+    // Registra os parâmetros correntes para uso pelas interações dos gráficos
+    current = { metric, useRate, yearFrom, yearTo, aggregation };
 
-    let path = d3.geoPath()
-        .projection(projection);
+    // top maior reserva espaço para o título do mapa (2 linhas, ~50px)
+    const mg = { left: 5, right: 5, top: 54, bottom: 5 };
 
-    const mGroup = svg.selectAll('#group')
-        .data([0])
-        .join('g')
-        .attr('id', 'group')
-        .attr('transform', `translate(${margens.left}, ${margens.top})`);
+    // Largura/altura do container com fallbacks em cascata. Se o SVG ainda não
+    // tem largura resolvida (CSS width:100% antes do layout), usamos o container
+    // pai e, em último caso, um padrão fixo. Isso garante que o mapa SEMPRE
+    // desenhe com uma projeção válida — nunca em branco. O resize handler em
+    // main.js reajusta quando a largura real fica disponível.
+    const node = svg.node();
+    let rawW = node.getBoundingClientRect().width;
+    if (rawW < 50 && node.parentNode) rawW = node.parentNode.getBoundingClientRect().width;
+    if (rawW < 50) rawW = 800;
+    let rawH = node.getBoundingClientRect().height;
+    if (rawH < 50) rawH = 560;
 
-    function updateMapSelection() {
-        mGroup.selectAll('path')
-            .style('fill', d => {
-                const id = String(d.properties.CD_MUN);
-                if (selectedMunicipality && selectedMunicipality === id) {
-                    return '#f4d03f';
-                }
+    const W = rawW - mg.left - mg.right;
+    const H = rawH - mg.top  - mg.bottom;
 
-                const value = intData.find(item => item.fmun_cod === id)?.value || 0;
-                return value > 0 ? colorScale(value) : '#f7f7f7';
-            })
-            .style('stroke-width', d => {
-                const id = String(d.properties.CD_MUN);
-                return selectedMunicipality && selectedMunicipality === id ? 2.2 : 1;
-            })
-            .style('stroke', d => {
-                const id = String(d.properties.CD_MUN);
-                return selectedMunicipality && selectedMunicipality === id ? '#8a6d0d' : 'black';
-            });
+    // Agrega crimes pelo nível escolhido (município ou região) no período;
+    // no modo taxa, calcula a média anual por unidade de agregação.
+    let rows;
+    const crimeExpr = buildCrimeTypeSumExpr(metric, 'c');
+    if (aggregation === 'regiao') {
+        if (!useRate) {
+            rows = await q(`
+                SELECT c.regiao AS region, SUM(${crimeExpr}) AS value
+                FROM crime_rj c
+                WHERE c.ano >= ${yearFrom} AND c.ano <= ${yearTo}
+                GROUP BY c.regiao
+            `);
+        } else {
+            rows = await q(`
+                SELECT region, AVG(year_rate) AS value
+                FROM (
+                    SELECT c.regiao AS region, c.ano,
+                           SUM(${crimeExpr}) * 10000.0 / NULLIF(SUM(p.populacao), 0) AS year_rate
+                    FROM crime_rj c
+                    LEFT JOIN (
+                        SELECT fmun_cod, ano, MAX(populacao) AS populacao
+                        FROM populacao_rj
+                        GROUP BY fmun_cod, ano
+                    ) p ON c.fmun_cod = p.fmun_cod AND c.ano = p.ano
+                    WHERE c.ano >= ${yearFrom} AND c.ano <= ${yearTo}
+                    GROUP BY c.regiao, c.ano
+                ) sub
+                GROUP BY region
+            `);
+        }
+    } else {
+        if (!useRate) {
+            rows = await q(`
+                SELECT c.fmun_cod, SUM(${crimeExpr}) AS value
+                FROM crime_rj c
+                WHERE c.ano >= ${yearFrom} AND c.ano <= ${yearTo}
+                GROUP BY c.fmun_cod
+            `);
+        } else {
+            rows = await q(`
+                SELECT fmun_cod, AVG(year_rate) AS value
+                FROM (
+                    SELECT c.fmun_cod, c.ano,
+                           SUM(${crimeExpr}) * 10000.0 / NULLIF(MAX(p.populacao), 0) AS year_rate
+                    FROM crime_rj c
+                    LEFT JOIN populacao_rj p ON c.fmun_cod = p.fmun_cod AND c.ano = p.ano
+                    WHERE c.ano >= ${yearFrom} AND c.ano <= ${yearTo}
+                    GROUP BY c.fmun_cod, c.ano
+                ) sub
+                GROUP BY fmun_cod
+            `);
+        }
     }
 
-    const tooltip = d3.select('body')
-        .selectAll('#tooltip')
-        .data([0])
-        .join('div')
+    // Índice código→valor (Map) para lookup O(1) ao colorir cada polígono,
+    // evitando varrer o array de linhas a cada município desenhado.
+    const lookup = new Map();
+    if (aggregation === 'regiao') {
+        const regionValueMap = new Map(rows.map(d => [String(d.region), +d.value]));
+        geojson.features.forEach(feature => {
+            const code = String(feature.properties.CD_MUN);
+            const region = municipalityRegionLookup.get(code);
+            lookup.set(code, region ? regionValueMap.get(region) ?? 0 : 0);
+        });
+        regionValueMap.forEach((value, region) => lookup.set(region, value));
+    } else {
+        rows.forEach(d => lookup.set(String(d.fmun_cod), +d.value));
+    }
+
+    // ── CÁLCULO DE ESCALA (cor) ────────────────────────────────────────────
+    // Escala quantílica: o domínio é o conjunto de valores observados e o range
+    // são 7 tons de vermelho. Diferente de scaleLinear, ela coloca ~o mesmo
+    // número de municípios em cada faixa, distribuindo-os uniformemente e
+    // impedindo que valores extremos (ex.: capital) achatem toda a paleta.
+    const colorScale = d3.scaleQuantile()
+        .domain(rows.map(d => +d.value).filter(v => v > 0))
+        .range(d3.schemeReds[7]);
+
+    // ── CÁLCULO DE ESCALA (geográfica) ─────────────────────────────────────
+    // A projeção Mercator converte (lon, lat) → (x, y) em pixels. fitExtent
+    // calcula automaticamente escala e translação para encaixar todo o GeoJSON
+    // dentro da área útil [W, H]. geoPath gera o atributo "d" de cada <path>.
+    const projection = d3.geoMercator().fitExtent([[0, 0], [W, H]], geojson);
+    const pathGen = d3.geoPath().projection(projection);
+
+    // ── ATUALIZAÇÃO DO DOM (data join) ─────────────────────────────────────
+    // Grupo <g> único e idempotente: data([0]) garante que ele seja criado uma
+    // vez e apenas reaproveitado nos re-renders (em vez de duplicado).
+    const g = svg.selectAll('#map-group').data([0]).join('g')
+        .attr('id', 'map-group')
+        .attr('transform', `translate(${mg.left},${mg.top})`);
+
+    const tip = d3.select('body').selectAll('#tooltip').data([0]).join('div')
         .attr('id', 'tooltip')
-        .style('position', 'absolute')
-        .style('display', 'none')
-        .style('background', 'white')
-        .style('border', '1px solid black')
-        .style('padding', '5px')
-        .style('pointer-events', 'none');
+        .style('position', 'absolute').style('display', 'none')
+        .style('background', '#fff').style('border', '1px solid #bbb')
+        .style('border-radius', '5px').style('padding', '6px 11px')
+        .style('font-size', '13px').style('pointer-events', 'none')
+        .style('box-shadow', '0 2px 8px rgba(0,0,0,0.14)');
 
-    mGroup.selectAll('path')
-        .data(geojson.features)
+    const mapFeatures = buildMapFeatures(geojson.features, aggregation);
+
+    // Data join: vincula um <path> a cada unidade do mapa (município ou região).
+    // join('path') cria os ausentes (enter), atualiza os existentes e remove
+    // os sobrando (exit) — assim a troca de métrica/período só recolore os
+    // mesmos polígonos, sem recriar o SVG inteiro.
+    g.selectAll('path')
+        .data(mapFeatures)
         .join('path')
-        .attr('d', path)
-        .style('stroke', 'black')
-        .on('mouseover', handleMouseOver)
-        .on('mousemove', handleMouseMove)
-        .on('mouseout', handleMouseOut)
-        .on('click', handleClick);
+        .attr('d', pathGen)                              // geometria projetada
+        .style('fill', d => {                            // cor ← valor via escala
+            const key = String(d.properties.CD_MUN);
+            const val = lookup.get(key) ?? 0;
+            return val > 0 ? colorScale(val) : '#f0f0f0'; // cinza = sem dado/zero
+        })
+        .style('stroke', '#fff').style('stroke-width', '0.5')
+        .on('mouseover', (event, d) => {
+            const key = String(d.properties.CD_MUN);
+            const val = lookup.get(key) ?? 0;
+            const region = aggregation === 'regiao' ? d.properties.NM_MUN : municipalityRegionLookup.get(key);
+            tip.style('display', 'block').html(
+                `<strong>${d.properties.NM_MUN}</strong><br>` +
+                `${aggregation === 'regiao' ? `Região: ${region ?? '—'}<br>` : ''}` +
+                `${metric}: ${val.toLocaleString('pt-BR', { maximumFractionDigits: 2 })}` +
+                (useRate ? ' / 10k hab.' : '')
+            );
+            d3.select(event.currentTarget).style('stroke', '#333').style('stroke-width', '1.5');
+        })
+        .on('mousemove', event => {
+            tip.style('left', `${event.pageX + 14}px`).style('top', `${event.pageY + 14}px`);
+        })
+        .on('mouseout', (event, d) => {
+            tip.style('display', 'none');
+            const isSelected = isFeatureSelected(d);
+            d3.select(event.currentTarget)
+                .style('stroke', isSelected ? '#333' : '#fff')
+                .style('stroke-width', isSelected ? '2' : '0.5');
+        })
+        // Click: Details on Demand — atualiza todas as linked views.
+        // Segundo clique no mesmo município desseleciona (toggle).
+        .on('click', (event, d) => {
+            selectScope(String(d.properties.CD_MUN), d.properties.NM_MUN, aggregation);
+        });
 
-    updateMapSelection();
+    // Zoom/pan — aplica transform apenas nos paths, não na legenda
+    svg.call(
+        d3.zoom().scaleExtent([1, 8]).on('zoom', ({ transform }) => {
+            g.selectAll('path').attr('transform', transform);
+        })
+    );
 
-    // ---- Zoom e Pan
-    const zoom = d3.zoom()
-        .scaleExtent([1, 8])
-        .on('zoom', handleZoom);
-    svg.call(zoom);
+    renderLegend(svg, colorScale, mg);
+    renderMapTitle(svg, metric, useRate, yearFrom, yearTo, aggregation);
+    applyMapHighlight(g);
 
-    await renderTopMunicipalities(metric, selectedYear);
-    await renderTopCrimes(metric, selectedYear, selectedMunicipality, selectedMunicipalityName);
-    await renderMonthlyEvolution(metric, selectedYear, selectedMunicipality, selectedMunicipalityName);
+    // Re-renderiza linked views se um escopo estava selecionado
+    await renderLinkedViews(metric, useRate, yearFrom, yearTo, aggregation);
+}
 
-    function handleMouseOver(event, d) {
-        const id = String(d.properties.CD_MUN);
-        const value = intData.find(item => item.fmun_cod === id)?.value || 0;
-        const formattedValue = value.toLocaleString('pt-BR', { maximumFractionDigits: 2 });
+// Seleciona/desseleciona um escopo (município ou região) e re-renderiza as linked views.
+// Reutilizado pelo clique no mapa E pelo clique nas barras de "Top municípios",
+// garantindo que ambas as origens produzam exatamente o mesmo comportamento.
+async function selectScope(code, name, aggregation) {
+    const normalizedCode = String(code);
+    const selectedKind = aggregation === 'regiao' ? 'regiao' : 'municipio';
+    const isSame = selectedScope?.kind === selectedKind && selectedScope?.code === normalizedCode;
+    selectedScope = isSame ? null : { kind: selectedKind, code: normalizedCode, name };
 
-        tooltip
-            .style('display', 'block')
-            .html(`${d.properties.NM_MUN}<br>${metric} (${selectedYear}): ${formattedValue} por 10 mil hab.`);
+    applyMapHighlight(d3.select('#map-group'));
+
+    if (!selectedScope) {
+        d3.select('#chart-timeline').selectAll('*').remove();
+        const c = document.getElementById('timeline-container');
+        if (c) c.style.display = 'none';
     }
+    await renderLinkedViews(current.metric, current.useRate, current.yearFrom, current.yearTo, current.aggregation);
+}
 
-    function handleMouseMove(event) {
-        tooltip
-            .style('left', `${event.pageX + 10}px`)
-            .style('top', `${event.pageY + 10}px`);
-    }
+function isFeatureSelected(d) {
+    if (!selectedScope) return false;
+    const code = String(d.properties.CD_MUN);
+    if (selectedScope.kind === 'municipio') return selectedScope.code === code;
+    return d.properties.region === selectedScope.code || d.properties.CD_MUN === selectedScope.code;
+}
 
-    function handleMouseOut() {
-        tooltip
-            .style('display', 'none');
-    }
+function applyMapHighlight(g) {
+    g.selectAll('path').each(function(d) {
+        const isSelected = isFeatureSelected(d);
+        d3.select(this)
+            .style('opacity', selectedScope && !isSelected ? 0.5 : 1)
+            .style('stroke', isSelected ? '#333' : '#fff')
+            .style('stroke-width', isSelected ? '2' : '0.5');
+    });
+}
 
-    async function handleClick(event, d) {
-        const id = String(d.properties.CD_MUN);
-        const isSameSelection = selectedMunicipality === id;
+// ── Título do mapa ─────────────────────────────────────────────────────────
+// Exibe o tipo de crime, o modo de normalização e o período correntes, deixando
+// explícito "o que" está sendo mostrado sem o usuário precisar olhar os controles.
+function renderMapTitle(svg, metric, useRate, yearFrom, yearTo, aggregation) {
+    svg.selectAll('#map-title').remove();
+    const W = +svg.node().getBoundingClientRect().width;
+    const periodo = yearFrom === yearTo ? `${yearFrom}` : `${yearFrom}–${yearTo}`;
+    const modo = useRate ? 'Taxa por 10 mil hab.' : 'Total acumulado';
 
-        selectedMunicipality = isSameSelection ? null : id;
-        selectedMunicipalityName = isSameSelection ? null : d.properties.NM_MUN;
-        updateMapSelection();
+    const t = svg.append('g').attr('id', 'map-title');
+    t.append('text')
+        .attr('x', W / 2).attr('y', 26)
+        .attr('text-anchor', 'middle')
+        .attr('font-size', '15px').attr('font-weight', '700')
+        .attr('fill', '#1f4e79')
+        .text(`${metric} · ${aggregation === 'regiao' ? 'Região' : 'Município'}`);
+    t.append('text')
+        .attr('x', W / 2).attr('y', 44)
+        .attr('text-anchor', 'middle')
+        .attr('font-size', '11px').attr('fill', '#777')
+        .text(`${modo} · ${periodo}`);
+}
 
-        await renderTopCrimes(metric, selectedYear, selectedMunicipality, selectedMunicipalityName);
-        await renderMonthlyEvolution(metric, selectedYear, selectedMunicipality, selectedMunicipalityName);
+// ── Legenda de cor ─────────────────────────────────────────────────────────
+function renderLegend(svg, colorScale, mg) {
+    svg.selectAll('#legend').remove();
+    const quantiles = colorScale.quantiles();
+    const colors = d3.schemeReds[7];
+    const bSize = 13, gap = 3;
+
+    const lg = svg.append('g').attr('id', 'legend')
+        .attr('transform', `translate(${mg.left + 8},${mg.top + 8})`);
+
+    colors.forEach((color, i) => {
+        lg.append('rect')
+            .attr('x', 0).attr('y', i * (bSize + gap))
+            .attr('width', bSize).attr('height', bSize)
+            .attr('fill', color).attr('rx', 2);
+        const lo = i === 0 ? 0 : quantiles[i - 1];
+        const hi = quantiles[i];
+        lg.append('text')
+            .attr('x', bSize + 5).attr('y', i * (bSize + gap) + bSize - 2)
+            .attr('font-size', '9px').attr('fill', '#333')
+            .text(hi != null ? `${fmt(lo)} – ${fmt(hi)}` : `> ${fmt(lo)}`);
+    });
+}
+
+const fmt = n => n.toLocaleString('pt-BR', { maximumFractionDigits: 1 });
+
+// ── Orquestrador das linked views ──────────────────────────────────────────
+// Coordena os 3 gráficos secundários: top crimes, top municípios e timeline.
+// Todos reagem ao mesmo estado (tipo de crime, período, município selecionado).
+async function renderLinkedViews(metric, useRate, yearFrom, yearTo, aggregation) {
+    const code = selectedScope?.code ?? null;
+    const name = selectedScope?.name ?? null;
+
+    await renderTopCrimesChart(code, name, useRate, yearFrom, yearTo, aggregation);
+    await renderTopMunChart(metric, useRate, yearFrom, yearTo, aggregation);
+
+    if (selectedScope && code) {
+        await renderTimeline(code, name, metric, useRate, yearFrom, yearTo, aggregation);
     }
 }
 
-export function clearMap() {
-    selectedMunicipality = null;
-    selectedMunicipalityName = null;
+// ── Todos os tipos de crime do escopo selecionado (ou estado) ───────────
+async function renderTopCrimesChart(code, name, useRate, yearFrom, yearTo, aggregation) {
+    const scopeFilter = code ? (aggregation === 'regiao' ? `c.regiao = '${code}' AND` : `CAST(c.fmun_cod AS VARCHAR) = '${code}' AND`) : '';
+    const parts = CRIME_TYPES.map(typeLabel => {
+        const expr = buildCrimeTypeSumExpr(typeLabel, 'c');
+        if (!useRate) return `
+            SELECT '${typeLabel}' AS crime_type, SUM(${expr}) AS value
+            FROM crime_rj c
+            WHERE ${scopeFilter}
+                  c.ano >= ${yearFrom} AND c.ano <= ${yearTo}
+        `;
+        return `
+            SELECT '${typeLabel}' AS crime_type, AVG(yr) AS value FROM (
+                SELECT c.ano,
+                       SUM(${expr}) * 10000.0 / NULLIF(MAX(p.populacao), 0) AS yr
+                FROM crime_rj c
+                LEFT JOIN populacao_rj p ON c.fmun_cod = p.fmun_cod AND c.ano = p.ano
+                WHERE ${scopeFilter}
+                      c.ano >= ${yearFrom} AND c.ano <= ${yearTo}
+                GROUP BY c.ano
+            ) sub
+        `;
+    });
 
-    d3.select('#chart-map')
-        .selectAll('#group')
-        .selectAll('path')
-        .remove();
-
-    d3.select('#chart-secondary')
-        .selectAll('*')
-        .remove();
-
-    d3.select('#chart-tertiary')
-        .selectAll('*')
-        .remove();
-
-    d3.select('#chart-line')
-        .selectAll('*')
-        .remove();
-}
-
-function handleZoom({ transform }) {
-    d3.select('#chart-map')
-        .selectAll('#group')
-        .selectAll('path')
-        .attr('transform', transform);
-}
-
-async function queryCrimeData(metric = 'furto_celular', year = null) {
-    if (!CRIME_TYPES.includes(metric)) {
-        throw new Error(`Invalid crime metric: ${metric}`);
-    }
-
-    const selectedYear = year || new Date().getFullYear();
-
-    const sql = `
-        SELECT
-            c.fmun_cod,
-            SUM(c.${metric}) * 10000.0 / NULLIF(MAX(p.populacao), 0) AS value
-        FROM crime_rj c
-        LEFT JOIN populacao_rj p
-            ON c.fmun_cod = p.fmun_cod
-           AND c.ano = p.ano
-        WHERE c.ano = ${selectedYear}
-        GROUP BY c.fmun_cod
-    `;
-
-    return await crime.query(sql);
-}
-
-async function queryTopMunicipalitiesData(metric = 'furto_celular', year = null) {
-    const selectedYear = year || new Date().getFullYear();
-
-    const sql = `
-        SELECT
-            c.fmun_cod,
-            c.fmun,
-            SUM(c.${metric}) * 10000.0 / NULLIF(MAX(p.populacao), 0) AS value
-        FROM crime_rj c
-        LEFT JOIN populacao_rj p
-            ON c.fmun_cod = p.fmun_cod
-           AND c.ano = p.ano
-        WHERE c.ano = ${selectedYear}
-        GROUP BY c.fmun_cod, c.fmun
+    const rows = await q(`
+        SELECT crime_type, value FROM (${parts.join(' UNION ALL ')}) sub
         ORDER BY value DESC
-        LIMIT 5
-    `;
-
-    return await crime.query(sql);
-}
-
-async function queryTopCrimesData(fmunCod, year = null) {
-    const selectedYear = year || new Date().getFullYear();
-    const whereClause = fmunCod ? `WHERE c.fmun_cod = '${fmunCod}'` : 'WHERE 1 = 1';
-
-    const crimesSql = CRIME_TYPES.map(metric => `
-        SELECT '${metric}' AS crime_type,
-               SUM(c.${metric}) * 10000.0 / NULLIF(MAX(p.populacao), 0) AS value
-        FROM crime_rj c
-        LEFT JOIN populacao_rj p
-            ON c.fmun_cod = p.fmun_cod
-           AND c.ano = p.ano
-        ${whereClause}
-          AND c.ano = ${selectedYear}
-    `).join(`
-        UNION ALL
     `);
 
-    const sql = `
-        SELECT crime_type, value
-        FROM (
-            ${crimesSql}
-        )
-        ORDER BY value DESC
-        LIMIT 5
-    `;
-
-    return await crime.query(sql);
+    drawBarChart(
+        '#chart-sidebar',
+        rows.map(d => ({ label: d.crime_type, val: +d.value })),
+        aggregation === 'regiao' ? `Tipos de crime − ${name ?? 'Estado RJ'} (região)` : `Tipos de crime − ${name ?? 'Estado RJ'}`,
+        useRate ? 'Taxa / 10k hab.' : 'Total',
+        '#2c6fad',
+        {
+            hint: 'clique em um tipo para mapeá-lo',
+            // Cross-filtering: o tipo clicado vira o tipo ativo do mapa
+            onBarClick: d => handlers.onMetricPick?.(d.label),
+        }
+    );
 }
 
-export async function renderTopMunicipalities(metric, year) {
-    const data = await queryTopMunicipalitiesData(metric, year);
-    await loadTopMunicipalitiesBarChart(data, metric, year);
-}
-
-async function renderTopCrimes(metric, year, municipalityCode = null, municipalityName = null) {
-    const data = await queryTopCrimesData(municipalityCode, year);
-    await loadTopCrimesBarChart(data, municipalityName || 'Estado');
-}
-
-async function loadTopMunicipalitiesBarChart(data, metric, year, svgSelector = '#chart-tertiary', margens = { left: 55, right: 25, top: 40, bottom: 95 }) {
-    const svg = d3.select(svgSelector);
-    if (svg.empty()) return;
-
-    svg.selectAll('*').remove();
-
-    const svgWidth = +svg.style('width').split('px')[0];
-    const svgHeight = +svg.style('height').split('px')[0];
-    const innerWidth = svgWidth - margens.left - margens.right;
-    const innerHeight = svgHeight - margens.top - margens.bottom;
-
-    svg.append('text')
-        .attr('x', svgWidth / 2).attr('y', 20)
-        .attr('text-anchor', 'middle').attr('fill', 'currentColor')
-        .attr('font-size', '14px').attr('font-weight', 'bold')
-        .text(`Top 5 municípios - ${metric} (${year})`);
-
-    const chartData = data.map(d => ({
-        municipality: d.fmun || d.fmun_cod,
-        value: Number(d.value)
-    }));
-
-    const x = d3.scaleBand()
-        .domain(chartData.map(d => d.municipality))
-        .range([0, innerWidth]).padding(0.1);
-
-    const y = d3.scaleLinear()
-        .domain([0, d3.max(chartData, d => d.value) || 0])
-        .nice()
-        .range([innerHeight, 0]);
-
-    const mainGroup = svg.append('g')
-        .attr('transform', `translate(${margens.left}, ${margens.top})`);
-
-    mainGroup.selectAll('rect')
-        .data(chartData).join('rect')
-        .attr('fill', '#2c6fad')
-        .attr('x', d => x(d.municipality))
-        .attr('y', d => y(d.value))
-        .attr('height', d => y(0) - y(d.value))
-        .attr('width', x.bandwidth())
-        .append('title')
-        .text(d => `${d.municipality}: ${d.value.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
-
-    mainGroup.selectAll('.bar-label')
-        .data(chartData).join('text')
-        .attr('class', 'bar-label')
-        .attr('x', d => x(d.municipality) + x.bandwidth() / 2)
-        .attr('y', d => y(d.value) - 6)
-        .attr('text-anchor', 'middle')
-        .attr('font-size', '11px').attr('fill', 'currentColor')
-        .text(d => d.value.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
-
-    svg.append('g')
-        .attr('transform', `translate(${margens.left}, ${svgHeight - margens.bottom})`)
-        .call(d3.axisBottom(x))
-        .call(g => g.selectAll('text')
-            .attr('font-size', '11px')
-            .attr('text-anchor', 'end')
-            .attr('transform', 'rotate(-35)')
-            .attr('dx', '-0.5em')
-            .attr('dy', '0.2em'));
-
-    svg.append('g')
-        .attr('transform', `translate(${margens.left}, ${margens.top})`)
-        .call(d3.axisLeft(y).ticks(5).tickFormat(d => d.toLocaleString('pt-BR')))
-        .call(g => g.append('text')
-            .attr('x', -40).attr('y', -18)
-            .attr('fill', 'currentColor').attr('text-anchor', 'start')
-            .attr('font-size', '12px').attr('font-weight', 'bold')
-            .text('Total (por 10 mil hab.)'));
-}
-
-async function queryMonthlyEvolution(metric = 'furto_celular', year = null, municipalityCode = null) {
-    const selectedYear = year || new Date().getFullYear();
-
-    let sql = `
-        SELECT
-            mes AS month,
-            SUM(${metric}) * 10000.0 / NULLIF(MAX(populacao), 0) AS value
-        FROM (
-            SELECT
-                c.mes,
-                c.${metric},
-                p.populacao
-            FROM crime_rj c
-            LEFT JOIN populacao_rj p
-                ON c.fmun_cod = p.fmun_cod
-               AND c.ano = p.ano
-            WHERE c.ano = ${selectedYear}
-    `;
-
-    if (municipalityCode) {
-        sql += ` AND c.fmun_cod = '${municipalityCode}'`;
+// ── Top 5 municípios para o tipo selecionado ─────────────────────────────
+async function renderTopMunChart(metric, useRate, yearFrom, yearTo, aggregation) {
+    const crimeExpr = buildCrimeTypeSumExpr(metric, 'c');
+    let rows;
+    if (aggregation === 'regiao') {
+        if (!useRate) {
+            rows = await q(`
+                SELECT c.regiao AS label, c.regiao AS code, SUM(${crimeExpr}) AS value
+                FROM crime_rj c
+                WHERE c.ano >= ${yearFrom} AND c.ano <= ${yearTo}
+                GROUP BY c.regiao
+                ORDER BY value DESC LIMIT 5
+            `);
+        } else {
+            rows = await q(`
+                SELECT region AS label, region AS code, AVG(year_rate) AS value
+                FROM (
+                    SELECT c.regiao AS region, c.ano,
+                           SUM(${crimeExpr}) * 10000.0 / NULLIF(SUM(p.populacao), 0) AS year_rate
+                    FROM crime_rj c
+                    LEFT JOIN (
+                        SELECT fmun_cod, ano, MAX(populacao) AS populacao
+                        FROM populacao_rj
+                        GROUP BY fmun_cod, ano
+                    ) p ON c.fmun_cod = p.fmun_cod AND c.ano = p.ano
+                    WHERE c.ano >= ${yearFrom} AND c.ano <= ${yearTo}
+                    GROUP BY c.regiao, c.ano
+                ) sub
+                GROUP BY region
+                ORDER BY value DESC LIMIT 5
+            `);
+        }
+    } else {
+        const scopeFilter = selectedScope?.kind === 'regiao' && selectedScope?.code ? `AND c.regiao = '${selectedScope.code}'` : '';
+        if (!useRate) {
+            rows = await q(`
+                SELECT c.fmun_cod, c.fmun, SUM(${crimeExpr}) AS value
+                FROM crime_rj c
+                WHERE c.ano >= ${yearFrom} AND c.ano <= ${yearTo}
+                      ${scopeFilter}
+                GROUP BY c.fmun_cod, c.fmun
+                ORDER BY value DESC LIMIT 5
+            `);
+        } else {
+            rows = await q(`
+                SELECT fmun_cod, fmun, AVG(year_rate) AS value
+                FROM (
+                    SELECT c.fmun_cod, c.fmun, c.ano,
+                           SUM(${crimeExpr}) * 10000.0 / NULLIF(MAX(p.populacao), 0) AS year_rate
+                    FROM crime_rj c
+                    LEFT JOIN populacao_rj p ON c.fmun_cod = p.fmun_cod AND c.ano = p.ano
+                    WHERE c.ano >= ${yearFrom} AND c.ano <= ${yearTo}
+                          ${scopeFilter}
+                    GROUP BY c.fmun_cod, c.fmun, c.ano
+                ) sub
+                GROUP BY fmun_cod, fmun
+                ORDER BY value DESC LIMIT 5
+            `);
+        }
     }
 
-    sql += `
-        ) t
-        GROUP BY mes
-        ORDER BY mes
-    `;
-
-    return await crime.query(sql);
+    drawBarChart(
+        '#chart-top-mun',
+        rows.map(d => ({
+            label: aggregation === 'regiao' ? d.label : d.fmun,
+            code: String(aggregation === 'regiao' ? d.code : d.fmun_cod),
+            val: +d.value
+        })),
+        aggregation === 'regiao' ? `Top 5 regiões − ${metric}` : `Top 5 municípios − ${metric}`,
+        useRate ? 'Taxa / 10k hab.' : 'Total',
+        '#5a8fc9',
+        {
+            hint: aggregation === 'regiao' ? 'clique em uma região para selecioná-la' : 'clique em um município para selecioná-lo',
+            // Cross-filtering: seleciona o município no mapa e abre seus detalhes
+            onBarClick: d => selectScope(d.code, d.label, aggregation),
+        }
+    );
 }
 
-export async function renderMonthlyEvolution(metric, year, municipalityCode = null, municipalityName = null) {
-    const data = await queryMonthlyEvolution(metric, year, municipalityCode);
-    await loadMonthlyEvolutionLineChart(data, metric, year, municipalityName);
-}
-
-async function loadMonthlyEvolutionLineChart(data, metric, year, municipalityName = null, svgSelector = '#chart-line', margens = { left: 55, right: 25, top: 40, bottom: 70 }) {
-    const svg = d3.select(svgSelector);
+// ── Reutilizável: bar chart horizontal ────────────────────────────────────
+// opts.onBarClick(d): se fornecido, torna as barras clicáveis (cross-filtering).
+// opts.hint: texto-dica exibido sob o título indicando a interação disponível.
+function drawBarChart(selector, data, title, yLabel, color, opts = {}) {
+    const { onBarClick = null, hint = null } = opts;
+    const svg = d3.select(selector);
     if (svg.empty()) return;
-
     svg.selectAll('*').remove();
 
-    const svgWidth = +svg.style('width').split('px')[0];
-    const svgHeight = +svg.style('height').split('px')[0];
-    const innerWidth = svgWidth - margens.left - margens.right;
-    const innerHeight = svgHeight - margens.top - margens.bottom;
+    const chartData = (Array.isArray(data) ? data : [])
+        .filter(Boolean)
+        .map(d => ({
+            ...d,
+            label: String(d.label ?? ''),
+            val: Number(d.val)
+        }))
+        .filter(d => d.label && Number.isFinite(d.val));
 
-    svg.append('text')
-        .attr('x', svgWidth / 2).attr('y', 20)
-        .attr('text-anchor', 'middle').attr('fill', 'currentColor')
-        .attr('font-size', '14px').attr('font-weight', 'bold')
-        .text(municipalityName ? `Evolução mensal - ${metric} (${municipalityName}, ${year})` : `Evolução mensal - ${metric} (${year})`);
-
-    const chartData = data.map(d => ({
-        month: Number(d.month),
-        value: Number(d.value)
-    }));
+    const m = { left: 58, right: 18, top: 36, bottom: 90 };
+    const W  = +svg.node().getBoundingClientRect().width;
+    const H  = +svg.node().getBoundingClientRect().height;
+    const iW = W - m.left - m.right;
+    const iH = H - m.top  - m.bottom;
 
     if (!chartData.length) {
         svg.append('text')
-            .attr('x', svgWidth / 2)
-            .attr('y', svgHeight / 2)
+            .attr('x', W / 2).attr('y', H / 2)
             .attr('text-anchor', 'middle')
-            .attr('fill', 'currentColor')
-            .attr('font-size', '13px')
-            .text('Selecione um município no mapa');
+            .attr('font-size', '11px')
+            .attr('fill', '#888')
+            .text('Sem dados para exibir');
         return;
     }
 
-    const x = d3.scaleLinear()
-        .domain(d3.extent(chartData, d => d.month))
-        .range([0, innerWidth]);
+    svg.append('text').attr('x', W / 2).attr('y', 19)
+        .attr('text-anchor', 'middle').attr('font-size', '13px').attr('font-weight', '700')
+        .attr('fill', '#1f4e79')
+        .text(title);
 
+    // Dica de interação (ex.: "clique para filtrar")
+    if (hint) {
+        svg.append('text').attr('x', W / 2).attr('y', 32)
+            .attr('text-anchor', 'middle').attr('font-size', '9px')
+            .attr('fill', '#999').attr('font-style', 'italic')
+            .text(hint);
+    }
+
+    // ── CÁLCULO DE ESCALAS (barras) ────────────────────────────────────────
+    // x (banda/ordinal): uma faixa por categoria, com padding de 22% entre
+    //   barras. x(label) dá a posição e x.bandwidth() a largura de cada barra.
+    // y (linear): magnitude → altura. domain começa em 0 (zero significativo) e
+    //   sobe 12% acima do máximo para folga do rótulo; .nice() arredonda os
+    //   limites. range invertido [iH, 0] porque em SVG o y cresce para baixo.
+    const x = d3.scaleBand().domain(chartData.map(d => d.label)).range([0, iW]).padding(0.22);
+    const maxValue = d3.max(chartData, d => d.val) ?? 0;
     const y = d3.scaleLinear()
-        .domain([0, d3.max(chartData, d => d.value) || 0])
+        .domain([0, maxValue > 0 ? maxValue * 1.12 : 1])
         .nice()
-        .range([innerHeight, 0]);
+        .range([iH, 0]);
 
-    const line = d3.line()
-        .x(d => x(d.month))
-        .y(d => y(d.value));
+    const g = svg.append('g').attr('transform', `translate(${m.left},${m.top})`);
 
-    const mainGroup = svg.append('g')
-        .attr('transform', `translate(${margens.left}, ${margens.top})`);
+    // Tooltip compartilhado (criado no renderMap); reutilizado aqui
+    const tip = d3.select('body').select('#tooltip');
 
-    mainGroup.append('path')
-        .datum(chartData)
-        .attr('fill', 'none')
-        .attr('stroke', '#2c6fad')
-        .attr('stroke-width', 2.5)
-        .attr('d', line);
+    // Data join: um <rect> por item. Posição/tamanho derivam das escalas; a
+    // altura é iH - y(val) porque y(val) é a coordenada do topo da barra.
+    g.selectAll('rect').data(chartData).join('rect')
+        .attr('fill', color).attr('rx', 2)
+        .attr('x', d => x(d.label)).attr('width', x.bandwidth())
+        .attr('y', d => y(d.val)).attr('height', d => iH - y(d.val))
+        .style('cursor', onBarClick ? 'pointer' : 'default')
+        // Hover: realça a barra e mostra o valor exato (Details on Demand)
+        .on('mouseover', function (event, d) {
+            d3.select(this).attr('fill', d3.color(color).darker(0.6));
+            if (!tip.empty()) tip.style('display', 'block').html(
+                `<strong>${d.label}</strong><br>` +
+                `${d.val.toLocaleString('pt-BR', { maximumFractionDigits: 2 })}` +
+                `${yLabel.includes('Taxa') ? ' / 10k hab.' : ''}`
+            );
+        })
+        .on('mousemove', event => {
+            if (!tip.empty()) tip.style('left', `${event.pageX + 14}px`)
+                                  .style('top', `${event.pageY + 14}px`);
+        })
+        .on('mouseout', function () {
+            d3.select(this).attr('fill', color);
+            if (!tip.empty()) tip.style('display', 'none');
+        })
+        .on('click', (event, d) => { if (onBarClick) onBarClick(d); });
 
-    mainGroup.selectAll('circle')
-        .data(chartData).join('circle')
-        .attr('cx', d => x(d.month))
-        .attr('cy', d => y(d.value))
-        .attr('r', 3.5)
-        .attr('fill', '#2c6fad');
+    g.selectAll('.lbl').data(chartData).join('text').attr('class', 'lbl')
+        .attr('x', d => x(d.label) + x.bandwidth() / 2)
+        .attr('y', d => y(d.val) - 4)
+        .attr('text-anchor', 'middle').attr('font-size', '9px')
+        .text(d => d.val.toLocaleString('pt-BR', { maximumFractionDigits: 1 }));
 
-    mainGroup.append('g')
-        .attr('transform', `translate(0, ${innerHeight})`)
-        .call(d3.axisBottom(x).ticks(chartData.length).tickFormat(d => d.toString()));
+    svg.append('g').attr('transform', `translate(${m.left},${H - m.bottom})`)
+        .call(d3.axisBottom(x))
+        .selectAll('text')
+        .attr('font-size', '9px').attr('text-anchor', 'end')
+        .attr('transform', 'rotate(-30)').attr('dx', '-0.4em').attr('dy', '0.2em');
 
-    mainGroup.append('g')
-        .call(d3.axisLeft(y).ticks(5).tickFormat(d => d.toLocaleString('pt-BR', { maximumFractionDigits: 2 })));
+    svg.append('g').attr('transform', `translate(${m.left},${m.top})`)
+        .call(d3.axisLeft(y).ticks(4)
+            .tickFormat(v => v.toLocaleString('pt-BR', { maximumFractionDigits: 0 })));
 
-    mainGroup.append('text')
-        .attr('x', -40).attr('y', -12)
-        .attr('fill', 'currentColor').attr('text-anchor', 'start')
-        .attr('font-size', '12px').attr('font-weight', 'bold')
-        .text('Total');
-
-    mainGroup.append('text')
-        .attr('x', innerWidth / 2).attr('y', innerHeight + 45)
-        .attr('text-anchor', 'middle').attr('fill', 'currentColor')
-        .attr('font-size', '12px').attr('font-weight', 'bold')
-        .text('Mês');
-
-    mainGroup.append('text')
-        .attr('x', 18)
-        .attr('y', 20)
-        .attr('fill', 'currentColor')
-        .attr('font-size', '11px')
-        .text('(por 10 mil hab.)');
+    svg.append('text')
+        .attr('transform', `translate(14,${m.top + iH / 2}) rotate(-90)`)
+        .attr('text-anchor', 'middle').attr('font-size', '10px')
+        .text(yLabel);
 }
 
-async function loadTopCrimesBarChart(data, municipalityName, svgSelector = '#chart-secondary', margens = { left: 55, right: 25, top: 40, bottom: 95 }) {
-    const svg = d3.select(svgSelector);
-    if (svg.empty()) return;
+// ── Timeline: série histórica mensal (dimensão "when") ────────────────────
+async function renderTimeline(code, name, metric, useRate, yearFrom, yearTo, aggregation) {
+    const container = document.getElementById('timeline-container');
+    if (container) container.style.display = 'block';
 
+    const svg = d3.select('#chart-timeline');
+    if (svg.empty()) return;
     svg.selectAll('*').remove();
 
-    const svgWidth = +svg.style("width").split("px")[0];
-    const svgHeight = +svg.style("height").split("px")[0];
-    const innerWidth = svgWidth - margens.left - margens.right;
-    const innerHeight = svgHeight - margens.top - margens.bottom;
+    // Série mensal com normalização por população se useRate
+    const crimeExpr = buildCrimeTypeSumExpr(metric, 'c');
+    const scopeFilter = aggregation === 'regiao' ? `c.regiao = '${code}'` : `CAST(c.fmun_cod AS VARCHAR) = '${code}'`;
+    let rows;
+    if (!useRate) {
+        rows = await q(`
+            SELECT c.ano, c.mes, SUM(${crimeExpr}) AS value
+            FROM crime_rj c
+            WHERE ${scopeFilter}
+              AND c.ano >= ${yearFrom} AND c.ano <= ${yearTo}
+            GROUP BY c.ano, c.mes ORDER BY c.ano, c.mes
+        `);
+    } else {
+        rows = await q(`
+            SELECT c.ano, c.mes,
+                   SUM(${crimeExpr}) * 10000.0 / NULLIF(MAX(p.populacao), 0) AS value
+            FROM crime_rj c
+            LEFT JOIN populacao_rj p ON c.fmun_cod = p.fmun_cod AND c.ano = p.ano
+            WHERE ${scopeFilter}
+              AND c.ano >= ${yearFrom} AND c.ano <= ${yearTo}
+            GROUP BY c.ano, c.mes ORDER BY c.ano, c.mes
+        `);
+    }
 
-    svg.append("text")
-        .attr("x", svgWidth / 2).attr("y", 20)
-        .attr("text-anchor", "middle").attr("fill", "currentColor")
-        .attr("font-size", "14px").attr("font-weight", "bold")
-        .text(`Top 5 crimes - ${municipalityName}`);
+    if (!rows.length) return;
 
-    const chartData = data.map(d => ({
-        crime_type: d.crime_type,
-        value: Number(d.value)
+    const m = { left: 58, right: 24, top: 36, bottom: 36 };
+    const W  = +svg.node().getBoundingClientRect().width;
+    const H  = +svg.node().getBoundingClientRect().height;
+    const iW = W - m.left - m.right;
+    const iH = H - m.top  - m.bottom;
+
+    // Number() evita erro se DuckDB retornar BigInt nos campos inteiros
+    const parsed = rows.map(d => ({
+        date: new Date(Number(d.ano), Number(d.mes) - 1, 1),
+        val: +d.value
     }));
 
-    const x = d3.scaleBand()
-        .domain(chartData.map(d => d.crime_type))
-        .range([0, innerWidth]).padding(0.1);
+    // ── CÁLCULO DE ESCALAS (timeline) ──────────────────────────────────────
+    // x (tempo): d3.extent pega [primeira data, última data] como domínio,
+    //   mapeando-as à largura útil — eixo temporal contínuo.
+    // y (linear): magnitude → altura, novamente com range invertido [iH, 0].
+    const x = d3.scaleTime().domain(d3.extent(parsed, d => d.date)).range([0, iW]);
+    const y = d3.scaleLinear().domain([0, d3.max(parsed, d => d.val) ?? 1]).nice().range([iH, 0]);
 
-    const y = d3.scaleLinear()
-        .domain([0, d3.max(chartData, d => d.value) || 0])
-        .nice()
-        .range([innerHeight, 0]);
+    svg.append('text').attr('x', W / 2).attr('y', 19)
+        .attr('text-anchor', 'middle').attr('font-size', '13px').attr('font-weight', '700')
+        .attr('fill', '#1f4e79')
+        .text(`${metric} — ${name} (${aggregation === 'regiao' ? 'região' : 'município'}) (série histórica mensal)`);
 
-    const mainGroup = svg.append("g")
-        .attr("transform", `translate(${margens.left}, ${margens.top})`);
+    // Dica da interação de brushing
+    svg.append('text').attr('x', W / 2).attr('y', 32)
+        .attr('text-anchor', 'middle').attr('font-size', '9px')
+        .attr('fill', '#999').attr('font-style', 'italic')
+        .text('arraste na horizontal para filtrar o período · clique fora para limpar');
 
-    mainGroup.selectAll("rect")
-        .data(chartData).join("rect")
-        .attr("fill", "#2c6fad")
-        .attr("x", d => x(d.crime_type))
-        .attr("y", d => y(d.value))
-        .attr("height", d => y(0) - y(d.value))
-        .attr("width", x.bandwidth())
-        .append("title")
-        .text(d => `${d.crime_type}: ${d.value.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
+    const g = svg.append('g').attr('transform', `translate(${m.left},${m.top})`);
 
-    mainGroup.selectAll(".bar-label")
-        .data(chartData).join("text")
-        .attr("class", "bar-label")
-        .attr("x", d => x(d.crime_type) + x.bandwidth() / 2)
-        .attr("y", d => y(d.value) - 6)
-        .attr("text-anchor", "middle")
-        .attr("font-size", "11px").attr("fill", "currentColor")
-        .text(d => d.value.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+    // Área preenchida reforça leitura de magnitude ao longo do tempo
+    g.append('path').datum(parsed)
+        .attr('fill', '#2c6fad').attr('fill-opacity', 0.12)
+        .attr('d', d3.area().x(d => x(d.date)).y0(iH).y1(d => y(d.val)).curve(d3.curveMonotoneX));
 
-    svg.append("g")
-        .attr("transform", `translate(${margens.left}, ${svgHeight - margens.bottom})`)
-        .call(d3.axisBottom(x))
-        .call(g => g.selectAll("text")
-            .attr("font-size", "11px")
-            .attr("text-anchor", "end")
-            .attr("transform", "rotate(-35)")
-            .attr("dx", "-0.5em")
-            .attr("dy", "0.2em"))
-        .call(g => g.append("text")
-            .attr("x", innerWidth / 2).attr("y", 85)
-            .attr("text-anchor", "middle").attr("fill", "currentColor")
-            .attr("font-size", "12px").attr("font-weight", "bold")
-            .text("Tipo de crime"));
+    g.append('path').datum(parsed)
+        .attr('fill', 'none').attr('stroke', '#2c6fad').attr('stroke-width', 1.8)
+        .attr('d', d3.line().x(d => x(d.date)).y(d => y(d.val)).curve(d3.curveMonotoneX));
 
-    svg.append("g")
-        .attr("transform", `translate(${margens.left}, ${margens.top})`)
-        .call(d3.axisLeft(y).ticks(5).tickFormat(d => d.toLocaleString()))
-        .call(g => g.append("text")
-            .attr("x", -40).attr("y", -18)
-            .attr("fill", "currentColor").attr("text-anchor", "start")
-            .attr("font-size", "12px").attr("font-weight", "bold")
-            .text("Total (por 10 mil hab.)"));
+    // ── Brushing temporal (dimensão "when") ────────────────────────────────
+    // Arrastar na horizontal seleciona um intervalo; ao soltar, os anos
+    // correspondentes viram o novo período global e tudo é refiltrado.
+    // Adicionado ANTES dos círculos para que estes fiquem clicáveis por cima.
+    const brush = d3.brushX()
+        .extent([[0, 0], [iW, iH]])
+        .on('end', (event) => {
+            if (!event.selection) return;          // clique simples = limpa (no-op aqui)
+            const [x0, x1] = event.selection.map(x.invert);
+            const a = Math.min(x0.getFullYear(), x1.getFullYear());
+            const b = Math.max(x0.getFullYear(), x1.getFullYear());
+            handlers.onPeriodPick?.(a, b);
+        });
+    g.append('g').attr('class', 'time-brush').call(brush);
+
+    // Pontos mensais — sobre o brush, com tooltip de detalhe ao passar o mouse
+    const tip = d3.select('body').select('#tooltip');
+    const mesFmt = d3.timeFormat('%m/%Y');
+    g.selectAll('circle.pt').data(parsed).join('circle')
+        .attr('class', 'pt')
+        .attr('cx', d => x(d.date)).attr('cy', d => y(d.val))
+        .attr('r', 2.5).attr('fill', '#2c6fad').style('cursor', 'pointer')
+        .on('mouseover', function (event, d) {
+            d3.select(this).attr('r', 4.5);
+            if (!tip.empty()) tip.style('display', 'block').html(
+                `<strong>${mesFmt(d.date)}</strong><br>` +
+                `${metric}: ${d.val.toLocaleString('pt-BR', { maximumFractionDigits: 2 })}` +
+                (useRate ? ' / 10k hab.' : '')
+            );
+        })
+        .on('mousemove', event => {
+            if (!tip.empty()) tip.style('left', `${event.pageX + 14}px`)
+                                  .style('top', `${event.pageY + 14}px`);
+        })
+        .on('mouseout', function () {
+            d3.select(this).attr('r', 2.5);
+            if (!tip.empty()) tip.style('display', 'none');
+        });
+
+    svg.append('g').attr('transform', `translate(${m.left},${m.top + iH})`)
+        .call(d3.axisBottom(x).ticks(d3.timeYear.every(1)).tickFormat(d3.timeFormat('%Y')))
+        .selectAll('text').attr('font-size', '10px');
+
+    svg.append('g').attr('transform', `translate(${m.left},${m.top})`)
+        .call(d3.axisLeft(y).ticks(4)
+            .tickFormat(v => v.toLocaleString('pt-BR', { maximumFractionDigits: 0 })));
+
+    svg.append('text')
+        .attr('transform', `translate(14,${m.top + iH / 2}) rotate(-90)`)
+        .attr('text-anchor', 'middle').attr('font-size', '10px')
+        .text(useRate ? 'Taxa / 10k' : 'Total');
+}
+
+// ── Limpeza ────────────────────────────────────────────────────────────────
+export function clearCharts() {
+    selectedScope = null;
+    d3.select('#map-group').selectAll('path')
+        .style('opacity', 1).style('stroke', '#fff').style('stroke-width', '0.5');
+    d3.select('#chart-sidebar').selectAll('*').remove();
+    d3.select('#chart-top-mun').selectAll('*').remove();
+    d3.select('#chart-timeline').selectAll('*').remove();
+    const c = document.getElementById('timeline-container');
+    if (c) c.style.display = 'none';
 }
