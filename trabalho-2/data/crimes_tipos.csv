@@ -1,0 +1,34 @@
+variavel,tipo
+hom_doloso,Crimes Violentos
+lesao_corp_morte,Crimes Violentos
+latrocinio,Crimes Violentos
+hom_por_interv_policial,Crimes Violentos
+tentat_hom,Crimes Violentos
+lesao_corp_dolosa,Crimes Violentos
+estupro,Crimes Violentos
+hom_culposo,Crimes de Trânsito
+lesao_corp_culposa,Crimes de Trânsito
+roubo_transeunte,Roubos
+roubo_celular,Roubos
+roubo_em_coletivo,Roubos
+roubo_veiculo,Roubos
+roubo_carga,Roubos
+roubo_comercio,Roubos
+roubo_residencia,Roubos
+roubo_banco,Roubos
+roubo_cx_eletronico,Roubos
+roubo_conducao_saque,Roubos
+roubo_apos_saque,Roubos
+roubo_bicicleta,Roubos
+outros_roubos,Roubos
+furto_veiculos,Furtos
+furto_transeunte,Furtos
+furto_coletivo,Furtos
+furto_celular,Furtos
+furto_bicicleta,Furtos
+outros_furtos,Furtos
+sequestro,Extorsão e Estelionato
+extorsao,Extorsão e Estelionato
+sequestro_relampago,Extorsão e Estelionato
+estelionato,Extorsão e Estelionato
+apreensao_drogas,Drogas

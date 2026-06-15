@@ -24,14 +24,26 @@ let geojson = null;
 let crimeTypeMap = new Map();
 export const CRIME_TYPES = [];
 
+let currentTransform = d3.zoomIdentity;
+let zoomInitialized = false;
+
 // Escopo selecionado no mapa; null = nenhum
 let selectedScope = null; // { kind: 'municipio'|'regiao', code: string, name: string }
 let municipalityRegionLookup = new Map();
 
+// Geometria de cada região já com as fronteiras internas dissolvidas.
+// Pré-calculada uma única vez no init (operação cara), reutilizada nos renders.
+let regionGeometryCache = new Map(); // region(name) -> GeoJSON geometry
+
+// Janela [Date, Date] selecionada por brushing na timeline de contexto.
+// Alimenta o gráfico de detalhe (focus + context); null = nenhuma seleção.
+let detailRange = null;
+let hoveredScope = null;
+
 // Parâmetros do último render — permitem que interações disparadas pelos
 // gráficos secundários (cliques em barras, brush) reconstruam as views sem
 // precisar reconsultar o estado global de main.js.
-let current = { metric: null, useRate: false, yearFrom: null, yearTo: null, aggregation: 'municipio' };
+let current = {}
 
 // Callbacks registrados por main.js para fechar o ciclo de Linked Views:
 // uma interação num gráfico altera o estado global, que re-renderiza tudo.
@@ -50,6 +62,91 @@ export async function initData(geoData) {
 
     const regionRows = await db.query('SELECT DISTINCT fmun_cod, regiao FROM crime_rj');
     municipalityRegionLookup = new Map(regionRows.map(({ fmun_cod, regiao }) => [String(fmun_cod), regiao]));
+
+    // Dissolve as fronteiras municipais dentro de cada região, uma vez só.
+    precomputeRegionGeometries();
+}
+
+// ── Dissolve de fronteiras (agregação por região) ──────────────────────────
+// Une os polígonos dos municípios de uma região removendo as fronteiras
+// internas, deixando só o contorno externo da região. Usa cancelamento de
+// arestas: numa malha topológica (como a do IBGE), cada fronteira interna é
+// percorrida por dois municípios em sentidos opostos — essas arestas se
+// cancelam; sobram apenas as arestas do contorno externo, que reconstituímos
+// em anéis. Tudo em JS puro, sem biblioteca externa (só D3 + DuckDB).
+function ringsOf(feature) {
+    const g = feature.geometry;
+    if (!g) return [];
+    if (g.type === 'Polygon') return g.coordinates;
+    if (g.type === 'MultiPolygon') return g.coordinates.flat();
+    return [];
+}
+
+function dissolveRings(rings) {
+    // Chave inteira por vértice (arredonda ~0,1 m) para casar bordas compartilhadas
+    const K = p => `${Math.round(p[0] * 1e6)},${Math.round(p[1] * 1e6)}`;
+    const edges = new Map(); // "ka>kb" -> [a, b]
+
+    for (const ring of rings) {
+        for (let i = 0; i + 1 < ring.length; i++) {
+            const a = ring[i], b = ring[i + 1];
+            const ka = K(a), kb = K(b);
+            if (ka === kb) continue;
+            const rev = `${kb}>${ka}`;
+            if (edges.has(rev)) edges.delete(rev);   // aresta interna: cancela
+            else edges.set(`${ka}>${kb}`, [a, b]);   // aresta de contorno: mantém
+        }
+    }
+
+    // Adjacência por vértice inicial, para costurar as arestas em anéis
+    const adj = new Map();
+    for (const [, seg] of edges) {
+        const ka = K(seg[0]);
+        if (!adj.has(ka)) adj.set(ka, []);
+        adj.get(ka).push(seg);
+    }
+
+    const used = new Set();
+    const outRings = [];
+    for (const [, seg] of edges) {
+        const segId = `${K(seg[0])}>${K(seg[1])}`;
+        if (used.has(segId)) continue;
+        const startK = K(seg[0]);
+        const ring = [seg[0]];
+        let cur = seg, guard = 0;
+        while (cur && guard++ < 2_000_000) {
+            used.add(`${K(cur[0])}>${K(cur[1])}`);
+            ring.push(cur[1]);
+            const nk = K(cur[1]);
+            if (nk === startK) break;               // anel fechado
+            const cands = (adj.get(nk) || []).filter(s => !used.has(`${K(s[0])}>${K(s[1])}`));
+            cur = cands[0] || null;
+        }
+        if (ring.length >= 4) outRings.push(ring);
+    }
+
+    return { type: 'MultiPolygon', coordinates: outRings.map(r => [r]) };
+}
+
+function precomputeRegionGeometries() {
+    const grouped = new Map();
+    geojson.features.forEach(f => {
+        const region = municipalityRegionLookup.get(String(f.properties.CD_MUN));
+        if (!region) return;
+        if (!grouped.has(region)) grouped.set(region, []);
+        grouped.get(region).push(f);
+    });
+
+    regionGeometryCache = new Map();
+    for (const [region, feats] of grouped) {
+        const dissolved = dissolveRings(feats.flatMap(ringsOf));
+        // Se o dissolve não produzir anéis (dados inesperados), cai para a
+        // concatenação simples dos polígonos (com fronteiras internas).
+        regionGeometryCache.set(
+            region,
+            dissolved.coordinates.length ? dissolved : buildRegionGeometryRaw(feats)
+        );
+    }
 }
 
 // ── Helpers de query ───────────────────────────────────────────────────────
@@ -81,20 +178,6 @@ function buildCrimeTypeSumExpr(typeLabel, alias = 'c') {
     const columns = crimeTypeMap.get(typeLabel) ?? [];
     if (!columns.length) return '0';
     return columns.map(col => `COALESCE(${alias}.${col}, 0)`).join(' + ');
-}
-
-// Para o modo taxa, calcula a média anual das taxas por 10k no período.
-// Usar AVG de taxas anuais é mais correto do que somar crimes e dividir por
-// uma única população, evitando distorção em períodos multi-anuais.
-function rateExpr(metric, useRate) {
-    if (!useRate) return `SUM(c.${metric})`;
-    return `
-        AVG(year_rate) FROM (
-            SELECT c2.fmun_cod,
-                   SUM(c2.${metric}) * 10000.0 / NULLIF(MAX(p2.populacao), 0) AS year_rate
-            FROM crime_rj c2
-            LEFT JOIN populacao_rj p2 ON c2.fmun_cod = p2.fmun_cod AND c2.ano = p2.ano
-    `;
 }
 
 // Wrapper genérico para queries — centraliza o tratamento de erros
@@ -145,7 +228,9 @@ function cross(a, b, c) {
     return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
 }
 
-function buildRegionGeometry(regionFeatures) {
+// Fallback: concatena os polígonos da região sem dissolver (mantém fronteiras
+// internas). Usado só se o dissolve por cancelamento de arestas falhar.
+function buildRegionGeometryRaw(regionFeatures) {
     const polygons = regionFeatures.flatMap(feature => {
         const geometry = feature.geometry;
         if (!geometry) return [];
@@ -180,14 +265,32 @@ function buildMapFeatures(features, aggregation) {
             NM_MUN: region,
             region
         },
-        geometry: buildRegionGeometry(regionFeatures)
+        // Geometria dissolvida (pré-calculada); só fronteiras entre regiões.
+        geometry: regionGeometryCache.get(region) ?? buildRegionGeometryRaw(regionFeatures)
     }));
 }
 
 // ── Mapa coroplético (Overview) ────────────────────────────────────────────
 export async function renderMap(metric, useRate, yearFrom, yearTo, aggregation = 'municipio') {
     const svg = d3.select('#chart-map');
+
+    svg.on('click', () => clearSelection());
+
     if (svg.empty() || !geojson) return;
+
+    // Ao trocar o nível de agregação (município ↔ região), a seleção anterior
+    // perde sentido (um município não existe no modo região e vice-versa).
+    // Limpamos a seleção e as visões de detalhe para evitar estado inconsistente
+    // no bar chart de cima — corrige o "bugzinho" da troca município↔região.
+    if (current.aggregation && current.aggregation !== aggregation) {
+    selectedScope = null;
+    detailRange = null;
+
+    currentTransform = d3.zoomIdentity;
+
+    d3.select('#chart-timeline').selectAll('*').remove();
+    d3.select('#chart-timeline-detail').selectAll('*').remove();
+}
 
     // Registra os parâmetros correntes para uso pelas interações dos gráficos
     current = { metric, useRate, yearFrom, yearTo, aggregation };
@@ -317,91 +420,164 @@ export async function renderMap(metric, useRate, yearFrom, yearTo, aggregation =
     // os sobrando (exit) — assim a troca de métrica/período só recolore os
     // mesmos polígonos, sem recriar o SVG inteiro.
     g.selectAll('path')
-        .data(mapFeatures)
-        .join('path')
+    .data(
+        mapFeatures,
+        d => `${aggregation}-${String(d.properties.CD_MUN)}`
+    )
+    .join('path')
         .attr('d', pathGen)                              // geometria projetada
         .style('fill', d => {                            // cor ← valor via escala
-            const key = String(d.properties.CD_MUN);
+            const key = aggregation === 'regiao'
+    ? d.properties.NM_MUN
+    : String(d.properties.CD_MUN);
             const val = lookup.get(key) ?? 0;
             return val > 0 ? colorScale(val) : '#f0f0f0'; // cinza = sem dado/zero
         })
         .style('stroke', '#fff').style('stroke-width', '0.5')
         .on('mouseover', (event, d) => {
-            const key = String(d.properties.CD_MUN);
-            const val = lookup.get(key) ?? 0;
-            const region = aggregation === 'regiao' ? d.properties.NM_MUN : municipalityRegionLookup.get(key);
-            tip.style('display', 'block').html(
-                `<strong>${d.properties.NM_MUN}</strong><br>` +
-                `${aggregation === 'regiao' ? `Região: ${region ?? '—'}<br>` : ''}` +
-                `${metric}: ${val.toLocaleString('pt-BR', { maximumFractionDigits: 2 })}` +
-                (useRate ? ' / 10k hab.' : '')
-            );
-            d3.select(event.currentTarget).style('stroke', '#333').style('stroke-width', '1.5');
-        })
+    const key = aggregation === 'regiao'
+    ? d.properties.NM_MUN
+    : String(d.properties.CD_MUN);
+    const val = lookup.get(key) ?? 0;
+    const region = aggregation === 'regiao'
+        ? d.properties.NM_MUN
+        : municipalityRegionLookup.get(key);
+
+    tip.style('display', 'block').html(
+        `<strong>${d.properties.NM_MUN}</strong><br>` +
+        `${aggregation === 'regiao' ? `Região: ${region ?? '—'}<br>` : ''}` +
+        `${metric}: ${val.toLocaleString('pt-BR', {
+            maximumFractionDigits: 2
+        })}` +
+        (useRate ? ' / 10k hab.' : '')
+    );
+
+    hoveredScope = key;
+    applyMapHighlight(g);
+})
         .on('mousemove', event => {
             tip.style('left', `${event.pageX + 14}px`).style('top', `${event.pageY + 14}px`);
         })
-        .on('mouseout', (event, d) => {
-            tip.style('display', 'none');
-            const isSelected = isFeatureSelected(d);
-            d3.select(event.currentTarget)
-                .style('stroke', isSelected ? '#333' : '#fff')
-                .style('stroke-width', isSelected ? '2' : '0.5');
-        })
+        .on('mouseout', () => {
+    tip.style('display', 'none');
+
+    hoveredScope = null;
+    applyMapHighlight(g);
+})
         // Click: Details on Demand — atualiza todas as linked views.
         // Segundo clique no mesmo município desseleciona (toggle).
-        .on('click', (event, d) => {
-            selectScope(String(d.properties.CD_MUN), d.properties.NM_MUN, aggregation);
-        });
+        .on('click', async function(event, d) {
+    event.stopPropagation();
+    event.preventDefault();
+
+    await selectScope(
+        String(d.properties.CD_MUN),
+        d.properties.NM_MUN,
+        aggregation
+    );
+});
 
     // Zoom/pan — aplica transform apenas nos paths, não na legenda
-    svg.call(
-        d3.zoom().scaleExtent([1, 8]).on('zoom', ({ transform }) => {
-            g.selectAll('path').attr('transform', transform);
-        })
-    );
+    if (!zoomInitialized) {
+    const zoomBehavior = d3.zoom()
+        .scaleExtent([1, 8])
+        .on('zoom', ({ transform }) => {
+            currentTransform = transform;
 
-    renderLegend(svg, colorScale, mg);
-    renderMapTitle(svg, metric, useRate, yearFrom, yearTo, aggregation);
-    applyMapHighlight(g);
+            d3.select('#map-group')
+                .attr(
+                    'transform',
+                    `translate(${mg.left},${mg.top}) ${transform}`
+                );
+        });
 
-    // Re-renderiza linked views se um escopo estava selecionado
-    await renderLinkedViews(metric, useRate, yearFrom, yearTo, aggregation);
+    svg.call(zoomBehavior);
+    svg.on('dblclick.zoom', null);
+    zoomInitialized = true;
+}
+
+g.attr(
+    'transform',
+    `translate(${mg.left},${mg.top}) ${currentTransform}`
+);
+
+applyMapHighlight(g);
+renderMapTitle(svg, metric, useRate, yearFrom, yearTo, aggregation);
+renderLegend(svg, colorScale, mg);
+await renderLinkedViews(metric, useRate, yearFrom, yearTo, aggregation);
 }
 
 // Seleciona/desseleciona um escopo (município ou região) e re-renderiza as linked views.
 // Reutilizado pelo clique no mapa E pelo clique nas barras de "Top municípios",
 // garantindo que ambas as origens produzam exatamente o mesmo comportamento.
 async function selectScope(code, name, aggregation) {
+    hoveredScope = null;
     const normalizedCode = String(code);
     const selectedKind = aggregation === 'regiao' ? 'regiao' : 'municipio';
     const isSame = selectedScope?.kind === selectedKind && selectedScope?.code === normalizedCode;
     selectedScope = isSame ? null : { kind: selectedKind, code: normalizedCode, name };
 
+    // Nova seleção zera o recorte de detalhe (o brush anterior não se aplica mais)
+    detailRange = null;
+
     applyMapHighlight(d3.select('#map-group'));
 
     if (!selectedScope) {
         d3.select('#chart-timeline').selectAll('*').remove();
-        const c = document.getElementById('timeline-container');
-        if (c) c.style.display = 'none';
+        d3.select('#chart-timeline-detail').selectAll('*').remove();
     }
     await renderLinkedViews(current.metric, current.useRate, current.yearFrom, current.yearTo, current.aggregation);
+}
+
+async function clearSelection() {
+    if (!selectedScope) return;
+
+    hoveredScope = null;
+    selectedScope = null;
+    detailRange = null;
+
+    applyMapHighlight(d3.select('#map-group'));
+
+    d3.select('#chart-timeline').selectAll('*').remove();
+    d3.select('#chart-timeline-detail').selectAll('*').remove();
+
+    await renderLinkedViews(
+        current.metric,
+        current.useRate,
+        current.yearFrom,
+        current.yearTo,
+        current.aggregation
+    );
 }
 
 function isFeatureSelected(d) {
     if (!selectedScope) return false;
     const code = String(d.properties.CD_MUN);
     if (selectedScope.kind === 'municipio') return selectedScope.code === code;
-    return d.properties.region === selectedScope.code || d.properties.CD_MUN === selectedScope.code;
+    return d.properties.region === selectedScope.code ||
+       String(d.properties.CD_MUN) === selectedScope.code;
 }
 
 function applyMapHighlight(g) {
     g.selectAll('path').each(function(d) {
+        const key = current.aggregation === 'regiao'
+    ? d.properties.NM_MUN
+    : String(d.properties.CD_MUN);
         const isSelected = isFeatureSelected(d);
-        d3.select(this)
-            .style('opacity', selectedScope && !isSelected ? 0.5 : 1)
-            .style('stroke', isSelected ? '#333' : '#fff')
-            .style('stroke-width', isSelected ? '2' : '0.5');
+        const isHovered = key === hoveredScope;
+
+        const sel = d3.select(this)
+            .style('opacity',
+                selectedScope && !isSelected ? 0.5 : 1
+            )
+            .style('stroke',
+                (isSelected || isHovered) ? '#000' : '#fff'
+            )
+            .style('stroke-width',
+                isSelected ? 2 :
+                isHovered ? 1.5 :
+                0.5
+            );
     });
 }
 
@@ -464,33 +640,49 @@ async function renderLinkedViews(metric, useRate, yearFrom, yearTo, aggregation)
     await renderTopCrimesChart(code, name, useRate, yearFrom, yearTo, aggregation);
     await renderTopMunChart(metric, useRate, yearFrom, yearTo, aggregation);
 
-    if (selectedScope && code) {
-        await renderTimeline(code, name, metric, useRate, yearFrom, yearTo, aggregation);
-    }
+    await renderTimeline(
+    code,
+    name ?? 'Estado do RJ',
+    metric,
+    useRate,
+    yearFrom,
+    yearTo,
+    aggregation
+);
 }
 
 // ── Todos os tipos de crime do escopo selecionado (ou estado) ───────────
 async function renderTopCrimesChart(code, name, useRate, yearFrom, yearTo, aggregation) {
-    const scopeFilter = code ? (aggregation === 'regiao' ? `c.regiao = '${code}' AND` : `CAST(c.fmun_cod AS VARCHAR) = '${code}' AND`) : '';
+    const scopeFilter = !code
+    ? '1=1'
+    : aggregation === 'regiao'
+        ? `c.regiao = '${code}'`
+        : `CAST(c.fmun_cod AS VARCHAR) = '${code}'`;
+    
     const parts = CRIME_TYPES.map(typeLabel => {
         const expr = buildCrimeTypeSumExpr(typeLabel, 'c');
         if (!useRate) return `
             SELECT '${typeLabel}' AS crime_type, SUM(${expr}) AS value
             FROM crime_rj c
             WHERE ${scopeFilter}
-                  c.ano >= ${yearFrom} AND c.ano <= ${yearTo}
+  AND c.ano >= ${yearFrom}
+  AND c.ano <= ${yearTo}
         `;
         return `
-            SELECT '${typeLabel}' AS crime_type, AVG(yr) AS value FROM (
-                SELECT c.ano,
-                       SUM(${expr}) * 10000.0 / NULLIF(MAX(p.populacao), 0) AS yr
-                FROM crime_rj c
-                LEFT JOIN populacao_rj p ON c.fmun_cod = p.fmun_cod AND c.ano = p.ano
-                WHERE ${scopeFilter}
-                      c.ano >= ${yearFrom} AND c.ano <= ${yearTo}
-                GROUP BY c.ano
-            ) sub
-        `;
+    SELECT '${typeLabel}' AS crime_type, AVG(yr) AS value
+    FROM (
+        SELECT c.ano,
+               SUM(${expr}) * 10000.0 / NULLIF(MAX(p.populacao), 0) AS yr
+        FROM crime_rj c
+        LEFT JOIN populacao_rj p
+            ON c.fmun_cod = p.fmun_cod
+           AND c.ano = p.ano
+        WHERE ${scopeFilter}
+          AND c.ano >= ${yearFrom}
+          AND c.ano <= ${yearTo}
+        GROUP BY c.ano
+    ) sub
+`;
     });
 
     const rows = await q(`
@@ -499,17 +691,16 @@ async function renderTopCrimesChart(code, name, useRate, yearFrom, yearTo, aggre
     `);
 
     drawBarChart(
-        '#chart-sidebar',
-        rows.map(d => ({ label: d.crime_type, val: +d.value })),
-        aggregation === 'regiao' ? `Tipos de crime − ${name ?? 'Estado RJ'} (região)` : `Tipos de crime − ${name ?? 'Estado RJ'}`,
-        useRate ? 'Taxa / 10k hab.' : 'Total',
-        '#2c6fad',
-        {
-            hint: 'clique em um tipo para mapeá-lo',
-            // Cross-filtering: o tipo clicado vira o tipo ativo do mapa
-            onBarClick: d => handlers.onMetricPick?.(d.label),
-        }
-    );
+    '#chart-sidebar',
+    rows.map(d => ({ label: d.crime_type, val: +d.value })),
+    `Tipos de crime − ${name ?? 'Estado do RJ'}`,
+    useRate ? 'Taxa / 10k hab.' : 'Total',
+    '#2c6fad',
+    {
+        hint: 'clique em um tipo para mapeá-lo',
+        onBarClick: d => handlers.onMetricPick?.(d.label),
+    }
+);
 }
 
 // ── Top 5 municípios para o tipo selecionado ─────────────────────────────
@@ -545,13 +736,17 @@ async function renderTopMunChart(metric, useRate, yearFrom, yearTo, aggregation)
             `);
         }
     } else {
-        const scopeFilter = selectedScope?.kind === 'regiao' && selectedScope?.code ? `AND c.regiao = '${selectedScope.code}'` : '';
+        const scopeFilter =
+    selectedScope?.kind === 'regiao' && selectedScope?.code
+        ? `c.regiao = '${selectedScope.code}'`
+        : '1=1';
         if (!useRate) {
             rows = await q(`
                 SELECT c.fmun_cod, c.fmun, SUM(${crimeExpr}) AS value
                 FROM crime_rj c
-                WHERE c.ano >= ${yearFrom} AND c.ano <= ${yearTo}
-                      ${scopeFilter}
+                WHERE ${scopeFilter}
+  AND c.ano >= ${yearFrom}
+  AND c.ano <= ${yearTo}
                 GROUP BY c.fmun_cod, c.fmun
                 ORDER BY value DESC LIMIT 5
             `);
@@ -563,8 +758,9 @@ async function renderTopMunChart(metric, useRate, yearFrom, yearTo, aggregation)
                            SUM(${crimeExpr}) * 10000.0 / NULLIF(MAX(p.populacao), 0) AS year_rate
                     FROM crime_rj c
                     LEFT JOIN populacao_rj p ON c.fmun_cod = p.fmun_cod AND c.ano = p.ano
-                    WHERE c.ano >= ${yearFrom} AND c.ano <= ${yearTo}
-                          ${scopeFilter}
+                    WHERE ${scopeFilter}
+  AND c.ano >= ${yearFrom}
+  AND c.ano <= ${yearTo}
                     GROUP BY c.fmun_cod, c.fmun, c.ano
                 ) sub
                 GROUP BY fmun_cod, fmun
@@ -609,7 +805,7 @@ function drawBarChart(selector, data, title, yLabel, color, opts = {}) {
         }))
         .filter(d => d.label && Number.isFinite(d.val));
 
-    const m = { left: 58, right: 18, top: 36, bottom: 90 };
+    const m = { left: 78, right: 18, top: 36, bottom: 90 };
     const W  = +svg.node().getBoundingClientRect().width;
     const H  = +svg.node().getBoundingClientRect().height;
     const iW = W - m.left - m.right;
@@ -677,9 +873,12 @@ function drawBarChart(selector, data, title, yLabel, color, opts = {}) {
                                   .style('top', `${event.pageY + 14}px`);
         })
         .on('mouseout', function () {
-            d3.select(this).attr('fill', color);
-            if (!tip.empty()) tip.style('display', 'none');
-        })
+    d3.select(this).attr('fill', color);
+
+    if (!tip.empty()) {
+        tip.style('display', 'none');
+    }
+})
         .on('click', (event, d) => { if (onBarClick) onBarClick(d); });
 
     g.selectAll('.lbl').data(chartData).join('text').attr('class', 'lbl')
@@ -692,16 +891,18 @@ function drawBarChart(selector, data, title, yLabel, color, opts = {}) {
         .call(d3.axisBottom(x))
         .selectAll('text')
         .attr('font-size', '9px').attr('text-anchor', 'end')
-        .attr('transform', 'rotate(-30)').attr('dx', '-0.4em').attr('dy', '0.2em');
+        .attr('transform', 'rotate(-35)').attr('dx', '-0.4em').attr('dy', '0.2em');
 
     svg.append('g').attr('transform', `translate(${m.left},${m.top})`)
         .call(d3.axisLeft(y).ticks(4)
             .tickFormat(v => v.toLocaleString('pt-BR', { maximumFractionDigits: 0 })));
 
     svg.append('text')
-        .attr('transform', `translate(14,${m.top + iH / 2}) rotate(-90)`)
-        .attr('text-anchor', 'middle').attr('font-size', '10px')
-        .text(yLabel);
+    .attr('transform', `translate(18,${m.top + iH / 2}) rotate(-90)`)
+    .attr('text-anchor', 'middle')
+    .attr('font-size', '13px')
+    .attr('font-weight', 'bold')
+    .text(yLabel);
 }
 
 // ── Timeline: série histórica mensal (dimensão "when") ────────────────────
@@ -715,14 +916,21 @@ async function renderTimeline(code, name, metric, useRate, yearFrom, yearTo, agg
 
     // Série mensal com normalização por população se useRate
     const crimeExpr = buildCrimeTypeSumExpr(metric, 'c');
-    const scopeFilter = aggregation === 'regiao' ? `c.regiao = '${code}'` : `CAST(c.fmun_cod AS VARCHAR) = '${code}'`;
+    
+    const scopeFilter = !code
+    ? '1=1'
+    : aggregation === 'regiao'
+        ? `c.regiao = '${code}'`
+        : `CAST(c.fmun_cod AS VARCHAR) = '${code}'`;
+    
     let rows;
     if (!useRate) {
         rows = await q(`
             SELECT c.ano, c.mes, SUM(${crimeExpr}) AS value
             FROM crime_rj c
             WHERE ${scopeFilter}
-              AND c.ano >= ${yearFrom} AND c.ano <= ${yearTo}
+  AND c.ano >= ${yearFrom}
+  AND c.ano <= ${yearTo}
             GROUP BY c.ano, c.mes ORDER BY c.ano, c.mes
         `);
     } else {
@@ -761,7 +969,7 @@ async function renderTimeline(code, name, metric, useRate, yearFrom, yearTo, agg
     svg.append('text').attr('x', W / 2).attr('y', 19)
         .attr('text-anchor', 'middle').attr('font-size', '13px').attr('font-weight', '700')
         .attr('fill', '#1f4e79')
-        .text(`${metric} — ${name} (${aggregation === 'regiao' ? 'região' : 'município'}) (série histórica mensal)`);
+.text(`${metric} — ${name} (série histórica mensal)`);
 
     // Dica da interação de brushing
     svg.append('text').attr('x', W / 2).attr('y', 32)
@@ -780,44 +988,45 @@ async function renderTimeline(code, name, metric, useRate, yearFrom, yearTo, agg
         .attr('fill', 'none').attr('stroke', '#2c6fad').attr('stroke-width', 1.8)
         .attr('d', d3.line().x(d => x(d.date)).y(d => y(d.val)).curve(d3.curveMonotoneX));
 
-    // ── Brushing temporal (dimensão "when") ────────────────────────────────
-    // Arrastar na horizontal seleciona um intervalo; ao soltar, os anos
-    // correspondentes viram o novo período global e tudo é refiltrado.
-    // Adicionado ANTES dos círculos para que estes fiquem clicáveis por cima.
+    // ── Brushing temporal · FOCUS + CONTEXT (dimensão "when") ──────────────
+    // Esta timeline é o CONTEXTO (toda a série do período). Arrastar na
+    // horizontal seleciona um trecho que é plotado, mês a mês, no gráfico de
+    // DETALHE logo abaixo — o padrão "focus + context" (exemplo do professor).
+    // Clicar fora (seleção vazia) limpa o detalhe. Adicionado ANTES dos
+    // círculos para que estes fiquem clicáveis por cima.
+    // Handler único para 'brush' (durante o arraste) e 'end' (ao soltar).
+    // Atualizar já no 'brush' faz o gráfico de baixo reagir AO VIVO conforme se
+    // arrasta — a sensação de "puxar os meses para o detalhe". É barato: só
+    // filtra o array `parsed` em memória e redesenha (sem consultar o banco).
+    const onBrush = (event) => {
+        if (!event.sourceEvent) return;            // ignora brush.move programático
+        if (!event.selection) {                    // clique simples = limpa o detalhe
+            detailRange = null;
+            renderTimelineDetail(parsed, metric, useRate, name, aggregation);
+            return;
+        }
+        const [x0, x1] = event.selection.map(x.invert);
+        detailRange = [x0, x1];
+        renderTimelineDetail(parsed, metric, useRate, name, aggregation);
+    };
     const brush = d3.brushX()
         .extent([[0, 0], [iW, iH]])
-        .on('end', (event) => {
-            if (!event.selection) return;          // clique simples = limpa (no-op aqui)
-            const [x0, x1] = event.selection.map(x.invert);
-            const a = Math.min(x0.getFullYear(), x1.getFullYear());
-            const b = Math.max(x0.getFullYear(), x1.getFullYear());
-            handlers.onPeriodPick?.(a, b);
-        });
-    g.append('g').attr('class', 'time-brush').call(brush);
+        .on('brush end', onBrush);
+    const brushG = g.append('g').attr('class', 'time-brush').call(brush);
+    // Reaplica visualmente a seleção anterior (ao re-renderizar por troca de tipo)
+    if (detailRange) {
+        const px = detailRange.map(d => Math.max(0, Math.min(iW, x(d))));
+        if (px[1] - px[0] > 1) brushG.call(brush.move, px);
+    }
 
-    // Pontos mensais — sobre o brush, com tooltip de detalhe ao passar o mouse
-    const tip = d3.select('body').select('#tooltip');
-    const mesFmt = d3.timeFormat('%m/%Y');
+    // Pontos mensais — apenas visuais (pointer-events: none) para NÃO interceptar
+    // o arraste do brush. A leitura de valores mês a mês fica no gráfico de
+    // detalhe abaixo, cujos pontos têm tooltip. Isso resolve o "não consigo puxar".
     g.selectAll('circle.pt').data(parsed).join('circle')
         .attr('class', 'pt')
         .attr('cx', d => x(d.date)).attr('cy', d => y(d.val))
-        .attr('r', 2.5).attr('fill', '#2c6fad').style('cursor', 'pointer')
-        .on('mouseover', function (event, d) {
-            d3.select(this).attr('r', 4.5);
-            if (!tip.empty()) tip.style('display', 'block').html(
-                `<strong>${mesFmt(d.date)}</strong><br>` +
-                `${metric}: ${d.val.toLocaleString('pt-BR', { maximumFractionDigits: 2 })}` +
-                (useRate ? ' / 10k hab.' : '')
-            );
-        })
-        .on('mousemove', event => {
-            if (!tip.empty()) tip.style('left', `${event.pageX + 14}px`)
-                                  .style('top', `${event.pageY + 14}px`);
-        })
-        .on('mouseout', function () {
-            d3.select(this).attr('r', 2.5);
-            if (!tip.empty()) tip.style('display', 'none');
-        });
+        .attr('r', 2).attr('fill', '#2c6fad')
+        .style('pointer-events', 'none');
 
     svg.append('g').attr('transform', `translate(${m.left},${m.top + iH})`)
         .call(d3.axisBottom(x).ticks(d3.timeYear.every(1)).tickFormat(d3.timeFormat('%Y')))
@@ -829,18 +1038,129 @@ async function renderTimeline(code, name, metric, useRate, yearFrom, yearTo, agg
 
     svg.append('text')
         .attr('transform', `translate(14,${m.top + iH / 2}) rotate(-90)`)
-        .attr('text-anchor', 'middle').attr('font-size', '10px')
+        .attr('text-anchor', 'middle').attr('font-size', '13px')
+        .attr('font-weight', 'bold')
+        .text(useRate ? 'Taxa / 10k' : 'Total');
+
+    // Renderiza (ou reaplica) o gráfico de detalhe abaixo: placeholder se não há
+    // recorte ativo, ou o trecho selecionado mês a mês se há.
+    renderTimelineDetail(parsed, metric, useRate, name, aggregation);
+}
+
+// ── Timeline de DETALHE (focus) — trecho selecionado, mês a mês ────────────
+// Recebe a série completa (parsed) e, se houver um recorte ativo (detailRange),
+// plota apenas os meses dentro dele com o eixo X em granularidade mensal e
+// rótulos em português. Sem recorte, mostra uma dica de uso.
+const MESES_ABBR = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
+const fmtMesAno = d => `${MESES_ABBR[d.getMonth()]}/${d.getFullYear()}`;
+
+function renderTimelineDetail(parsed, metric, useRate, name, aggregation) {
+    const svg = d3.select('#chart-timeline-detail');
+    if (svg.empty()) return;
+    svg.selectAll('*').remove();
+
+    const W = +svg.node().getBoundingClientRect().width;
+    const H = +svg.node().getBoundingClientRect().height;
+
+    // Sem recorte ativo → dica de uso (estado inicial do focus + context)
+    if (!detailRange) {
+        svg.append('text').attr('x', W / 2).attr('y', 19)
+            .attr('text-anchor', 'middle').attr('font-size', '13px').attr('font-weight', '700')
+            .attr('fill', '#1f4e79').text('Detalhe mensal');
+        svg.append('text').attr('x', W / 2).attr('y', H / 2 + 4)
+            .attr('text-anchor', 'middle').attr('font-size', '12px').attr('fill', '#999')
+            .text('Arraste um trecho na linha de cima para vê-lo mês a mês aqui.');
+        return;
+    }
+
+    // Recorte ativo: filtra os meses dentro de [d0, d1]
+    const [d0, d1] = detailRange[0] <= detailRange[1] ? detailRange : [detailRange[1], detailRange[0]];
+    const sub = parsed.filter(d => d.date >= d0 && d.date <= d1);
+
+    if (sub.length === 0) {
+        svg.append('text').attr('x', W / 2).attr('y', H / 2)
+            .attr('text-anchor', 'middle').attr('font-size', '12px').attr('fill', '#999')
+            .text('Sem meses no trecho selecionado.');
+        return;
+    }
+
+    const m = { left: 58, right: 24, top: 36, bottom: 52 };
+    const iW = W - m.left - m.right;
+    const iH = H - m.top - m.bottom;
+
+    // ── CÁLCULO DE ESCALAS (detalhe) ───────────────────────────────────────
+    // x temporal limitado ao recorte; y linear a partir do zero, com folga.
+    const x = d3.scaleTime().domain(d3.extent(sub, d => d.date)).range([0, iW]);
+    const y = d3.scaleLinear().domain([0, d3.max(sub, d => d.val) ?? 1]).nice().range([iH, 0]);
+
+    svg.append('text').attr('x', W / 2).attr('y', 19)
+        .attr('text-anchor', 'middle').attr('font-size', '13px').attr('font-weight', '700')
+        .attr('fill', '#1f4e79')
+        .text(`Detalhe mensal — ${name} · ${fmtMesAno(d0)} a ${fmtMesAno(sub[sub.length - 1].date)}`);
+
+    const g = svg.append('g').attr('transform', `translate(${m.left},${m.top})`);
+
+    // Área + linha, mesma identidade visual da timeline de contexto
+    g.append('path').datum(sub)
+        .attr('fill', '#2c6fad').attr('fill-opacity', 0.12)
+        .attr('d', d3.area().x(d => x(d.date)).y0(iH).y1(d => y(d.val)).curve(d3.curveMonotoneX));
+    g.append('path').datum(sub)
+        .attr('fill', 'none').attr('stroke', '#2c6fad').attr('stroke-width', 2)
+        .attr('d', d3.line().x(d => x(d.date)).y(d => y(d.val)).curve(d3.curveMonotoneX));
+
+    // Pontos com tooltip de detalhe
+    const tip = d3.select('body').select('#tooltip');
+    g.selectAll('circle.ptd').data(sub).join('circle')
+        .attr('class', 'ptd')
+        .attr('cx', d => x(d.date)).attr('cy', d => y(d.val))
+        .attr('r', 3).attr('fill', '#2c6fad').style('cursor', 'pointer')
+        .on('mouseover', function (event, d) {
+            d3.select(this).attr('r', 5);
+            if (!tip.empty()) tip.style('display', 'block').html(
+                `<strong>${fmtMesAno(d.date)}</strong><br>` +
+                `${metric}: ${d.val.toLocaleString('pt-BR', { maximumFractionDigits: 2 })}` +
+                (useRate ? ' / 10k hab.' : '')
+            );
+        })
+        .on('mousemove', event => {
+            if (!tip.empty()) tip.style('left', `${event.pageX + 14}px`)
+                                  .style('top', `${event.pageY + 14}px`);
+        })
+        .on('mouseout', function () {
+            d3.select(this).attr('r', 3);
+            if (!tip.empty()) tip.style('display', 'none');
+        });
+
+    // ── Eixo X em granularidade MENSAL (meses explícitos) ──────────────────
+    // Escolhe o passo dos ticks conforme o nº de meses, para não poluir.
+    const months = sub.length;
+    const step = months <= 14 ? 1 : months <= 30 ? 2 : months <= 60 ? 4 : 6;
+    svg.append('g').attr('transform', `translate(${m.left},${m.top + iH})`)
+        .call(d3.axisBottom(x).ticks(d3.timeMonth.every(step)).tickFormat(fmtMesAno))
+        .selectAll('text')
+        .attr('font-size', '9px').attr('text-anchor', 'end')
+        .attr('transform', 'rotate(-35)').attr('dx', '-0.4em').attr('dy', '0.3em');
+
+    svg.append('g').attr('transform', `translate(${m.left},${m.top})`)
+        .call(d3.axisLeft(y).ticks(4)
+            .tickFormat(v => v.toLocaleString('pt-BR', { maximumFractionDigits: 0 })));
+
+    svg.append('text')
+        .attr('transform', `translate(14,${m.top + iH / 2}) rotate(-90)`)
+        .attr('text-anchor', 'middle').attr('font-size', '13px')
+        .attr('font-weight', 'bold')
         .text(useRate ? 'Taxa / 10k' : 'Total');
 }
 
 // ── Limpeza ────────────────────────────────────────────────────────────────
 export function clearCharts() {
     selectedScope = null;
+    detailRange = null;
+    hoveredScope = null;
     d3.select('#map-group').selectAll('path')
         .style('opacity', 1).style('stroke', '#fff').style('stroke-width', '0.5');
     d3.select('#chart-sidebar').selectAll('*').remove();
     d3.select('#chart-top-mun').selectAll('*').remove();
     d3.select('#chart-timeline').selectAll('*').remove();
-    const c = document.getElementById('timeline-container');
-    if (c) c.style.display = 'none';
+    d3.select('#chart-timeline-detail').selectAll('*').remove();
 }

@@ -31,7 +31,7 @@
             <div class="toggle-group">
                 <span class="toggle-label">Valores:</span>
                 <button id="btn-rate" class="toggle-btn">Por 10 mil hab.</button>
-                <button id="btn-total" class="toggle-btn active">Total</button>
+                <button id="btn-total" class="toggle-btn">Total</button>
             </div>
             <div class="toggle-group">
                 <span class="toggle-label">Tipo de Crime:</span>
@@ -46,7 +46,7 @@
             </div>
             <div class="toggle-group">
                 <span class="toggle-label">Agregação:</span>
-                <button id="btn-municipio" class="toggle-btn active">Município</button>
+                <button id="btn-municipio" class="toggle-btn">Município</button>
                 <button id="btn-regiao" class="toggle-btn">Região</button>
             </div>
             <div class="toggle-group">
@@ -65,7 +65,10 @@
                 <svg id="chart-map"></svg>
                 <!-- Linked view temporal: aparece após o 1º clique -->
                 <div id="timeline-container" style="display:none;">
+                    <!-- Contexto: série completa do período (overview temporal) -->
                     <svg id="chart-timeline"></svg>
+                    <!-- Detalhe (focus): trecho selecionado por brushing, mês a mês -->
+                    <svg id="chart-timeline-detail"></svg>
                 </div>
             </div>
 

@@ -231,7 +231,7 @@ body {
 /* ── Charts grid ──────────────────────────────────────────── */
 .charts-grid {
     display: grid;
-    grid-template-columns: minmax(0, 2fr) minmax(300px, 1fr);
+    grid-template-columns: minmax(0, 1.9fr) minmax(380px, 1fr);
     gap: 14px;
     align-items: start;
 }
@@ -244,6 +244,7 @@ body {
     display: flex;
     flex-direction: column;
     gap: 14px;
+    height: 100%;
 }
 
 /* ── SVGs ─────────────────────────────────────────────────── */
@@ -254,16 +255,26 @@ svg {
     box-shadow: 0 1px 4px rgba(0,0,0,0.07);
     display: block;
     width: 100%;
+    /* Impede que o arraste (brush no tempo, pan no mapa) vire seleção de
+       texto/elementos ou role a página — corrige o "seleciona vários e desce". */
+    user-select: none;
+    -webkit-user-select: none;
+    -ms-user-select: none;
+    touch-action: none;
 }
-#chart-map      { height: 560px; }
-#chart-timeline { height: 200px; }
-#chart-sidebar  { height: 280px; }
-#chart-top-mun  { height: 280px; }
+#chart-map             { height: 560px; }
+#chart-timeline        { height: 200px; }
+#chart-timeline-detail { height: 200px; }
+#chart-sidebar  { height: 310px; }
+#chart-top-mun  { height: 310px; }
 
 /* ── Timeline container (oculto até 1º clique) ────────────── */
+/* Empilha a série de contexto e a de detalhe (focus + context) */
 #timeline-container {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
     border-radius: 8px;
-    overflow: hidden;
 }
 
 /* ── Footer ───────────────────────────────────────────────── */

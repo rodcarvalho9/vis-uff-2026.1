@@ -17,11 +17,11 @@ import { initData, renderMap, clearCharts, CRIME_TYPES, setInteractionHandlers }
 //   useRate  : false = total absoluto · true = taxa por 10 mil habitantes
 //   yearFrom/yearTo : janela temporal (inclusive) usada nas agregações
 const state = {
-    metric:   'Crimes Violentos',
-    useRate:  false,
+    metric: 'Crimes Violentos',
+    useRate: true,
     aggregation: 'municipio',
     yearFrom: 2014,
-    yearTo:   2025,
+    yearTo: 2025,
 };
 
 // Único ponto de re-renderização: lê o estado atual e o repassa ao mapa, que
@@ -128,6 +128,19 @@ window.onload = async () => {
 
     document.querySelector('#clearBtn').addEventListener('click', clearCharts);
 
+    // Inicializa visualmente os toggles conforme o estado
+document.querySelector('#btn-rate')
+    .classList.toggle('active', state.useRate);
+
+document.querySelector('#btn-total')
+    .classList.toggle('active', !state.useRate);
+
+document.querySelector('#btn-municipio')
+    .classList.toggle('active', state.aggregation === 'municipio');
+
+document.querySelector('#btn-regiao')
+    .classList.toggle('active', state.aggregation === 'regiao');
+
     // Esconde overlay e renderiza o estado inicial
     overlay.classList.add('hidden');
 
@@ -138,12 +151,6 @@ window.onload = async () => {
     // sempre desenha algo mesmo que o layout ainda não tenha resolvido a
     // largura do container — nunca fica em branco.
     await render();
-
-    // Reforços via setTimeout (que dispara de forma confiável, ao contrário de
-    // requestAnimationFrame em abas inativas): re-renderiza logo após o layout
-    // assentar, capturando a largura real do container.
-    setTimeout(() => render(), 120);
-    setTimeout(() => render(), 600);
 
     // ── Re-render responsivo a redimensionamentos ──────────────────────────
     let lastWidth = mapSvg.getBoundingClientRect().width;
