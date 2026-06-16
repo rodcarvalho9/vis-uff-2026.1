@@ -1,60 +1,45 @@
-// ════════════════════════════════════════════════════════════════════════
-// map.js — Renderização e interação de todas as visões (camada de visualização)
-//
-// Concentra o desenho com D3.js das quatro visões coordenadas:
-//   • Mapa coroplético (Overview)        → renderMap()
-//   • Tipos de crime do município       → renderTopCrimesChart() + drawBarChart()
-//   • Top 5 municípios do tipo          → renderTopMunChart()    + drawBarChart()
-//   • Série histórica mensal (timeline)  → renderTimeline()
-//
-// Três responsabilidades técnicas recorrentes neste arquivo:
-//   1. CÁLCULO DE ESCALAS — mapear valores de dados para canais visuais
-//      (cor, posição, comprimento) via d3.scale*.
-//   2. ATUALIZAÇÃO DO DOM — usar o padrão data join do D3
-//      (selectAll().data().join()) para criar/atualizar/remover elementos SVG.
-//   3. COORDENAÇÃO — toda interação volta ao estado global (em main.js) e
-//      dispara um novo render, mantendo as visões sincronizadas.
-// ════════════════════════════════════════════════════════════════════════
+// map.js
+// Aqui fica todo o desenho com D3: o mapa, os dois bar charts e as duas
+// timelines. As funções principais são renderMap (mapa + orquestra o resto),
+// renderTopCrimesChart, renderTopMunChart, renderTimeline e renderTimelineDetail.
+// A regra geral: quem guarda o estado é o main.js; este arquivo só desenha e,
+// quando o usuário clica/arrasta, avisa o main.js pelos callbacks.
+
 import * as d3 from 'd3';
 import { Database } from './database';
 
-// ── Singletons de módulo ───────────────────────────────────────────────────
+// estado de módulo
 const db = new Database();
 let geojson = null;
 let crimeTypeMap = new Map();
 export const CRIME_TYPES = [];
 
+// guarda o zoom/pan atual pra não resetar a cada render
 let currentTransform = d3.zoomIdentity;
 let zoomInitialized = false;
 
-// Escopo selecionado no mapa; null = nenhum
-let selectedScope = null; // { kind: 'municipio'|'regiao', code: string, name: string }
-let municipalityRegionLookup = new Map();
+// o que está selecionado no mapa (município ou região), ou null
+let selectedScope = null; // { kind, code, name }
+let municipalityRegionLookup = new Map(); // fmun_cod -> regiao
 
-// Geometria de cada região já com as fronteiras internas dissolvidas.
-// Pré-calculada uma única vez no init (operação cara), reutilizada nos renders.
-let regionGeometryCache = new Map(); // region(name) -> GeoJSON geometry
+// geometria das regiões já com as divisas internas removidas (calculado 1x no init)
+let regionGeometryCache = new Map();
 
-// Janela [Date, Date] selecionada por brushing na timeline de contexto.
-// Alimenta o gráfico de detalhe (focus + context); null = nenhuma seleção.
+// trecho [Date, Date] que o usuário marcou na timeline de cima (pra timeline de baixo)
 let detailRange = null;
 let hoveredScope = null;
 
-// Parâmetros do último render — permitem que interações disparadas pelos
-// gráficos secundários (cliques em barras, brush) reconstruam as views sem
-// precisar reconsultar o estado global de main.js.
+// últimos parâmetros usados no render, pra reaproveitar quando o clique vem de um gráfico
 let current = {}
 
-// Callbacks registrados por main.js para fechar o ciclo de Linked Views:
-// uma interação num gráfico altera o estado global, que re-renderiza tudo.
+// o main.js registra aqui o que fazer quando clicam numa barra ou métrica
 let handlers = { onMetricPick: null, onPeriodPick: null };
 export function setInteractionHandlers(h) { handlers = { ...handlers, ...h }; }
 
-// ── Inicialização ──────────────────────────────────────────────────────────
+// carrega os dados no DuckDB e prepara os lookups. roda uma vez no começo.
 export async function initData(geoData) {
     geojson = geoData;
     await db.init();
-    // Carrega as tabelas de crimes, população e mapeamento por tipo de crime
     await Promise.all([db.loadCrime(), db.loadPopulacao(), db.loadTipoCrime()]);
 
     const typeRows = await db.query('SELECT variavel, tipo FROM tipo_crime');
@@ -63,17 +48,13 @@ export async function initData(geoData) {
     const regionRows = await db.query('SELECT DISTINCT fmun_cod, regiao FROM crime_rj');
     municipalityRegionLookup = new Map(regionRows.map(({ fmun_cod, regiao }) => [String(fmun_cod), regiao]));
 
-    // Dissolve as fronteiras municipais dentro de cada região, uma vez só.
-    precomputeRegionGeometries();
+    precomputeRegionGeometries(); // pré-calcula as regiões dissolvidas
 }
 
-// ── Dissolve de fronteiras (agregação por região) ──────────────────────────
-// Une os polígonos dos municípios de uma região removendo as fronteiras
-// internas, deixando só o contorno externo da região. Usa cancelamento de
-// arestas: numa malha topológica (como a do IBGE), cada fronteira interna é
-// percorrida por dois municípios em sentidos opostos — essas arestas se
-// cancelam; sobram apenas as arestas do contorno externo, que reconstituímos
-// em anéis. Tudo em JS puro, sem biblioteca externa (só D3 + DuckDB).
+// Junta os municípios de uma região num polígono só, sem as divisas internas.
+// A ideia: como a malha do IBGE é "casadinha", cada divisa interna aparece duas
+// vezes (uma em cada município, em sentido contrário). Se a gente cancela essas
+// arestas repetidas, sobra só o contorno de fora. Feito na mão, sem topojson.
 function ringsOf(feature) {
     const g = feature.geometry;
     if (!g) return [];
@@ -83,9 +64,9 @@ function ringsOf(feature) {
 }
 
 function dissolveRings(rings) {
-    // Chave inteira por vértice (arredonda ~0,1 m) para casar bordas compartilhadas
+    // arredonda o vértice pra string, senão pontos iguais não batem por causa de float
     const K = p => `${Math.round(p[0] * 1e6)},${Math.round(p[1] * 1e6)}`;
-    const edges = new Map(); // "ka>kb" -> [a, b]
+    const edges = new Map();
 
     for (const ring of rings) {
         for (let i = 0; i + 1 < ring.length; i++) {
@@ -93,12 +74,12 @@ function dissolveRings(rings) {
             const ka = K(a), kb = K(b);
             if (ka === kb) continue;
             const rev = `${kb}>${ka}`;
-            if (edges.has(rev)) edges.delete(rev);   // aresta interna: cancela
-            else edges.set(`${ka}>${kb}`, [a, b]);   // aresta de contorno: mantém
+            if (edges.has(rev)) edges.delete(rev);   // já tinha a volta -> divisa interna, tira as duas
+            else edges.set(`${ka}>${kb}`, [a, b]);
         }
     }
 
-    // Adjacência por vértice inicial, para costurar as arestas em anéis
+    // monta um índice "de qual vértice sai cada aresta" pra conseguir costurar os anéis
     const adj = new Map();
     for (const [, seg] of edges) {
         const ka = K(seg[0]);
@@ -140,8 +121,7 @@ function precomputeRegionGeometries() {
     regionGeometryCache = new Map();
     for (const [region, feats] of grouped) {
         const dissolved = dissolveRings(feats.flatMap(ringsOf));
-        // Se o dissolve não produzir anéis (dados inesperados), cai para a
-        // concatenação simples dos polígonos (com fronteiras internas).
+        // se por algum motivo não sair nenhum anel, usa os polígonos sem dissolver
         regionGeometryCache.set(
             region,
             dissolved.coordinates.length ? dissolved : buildRegionGeometryRaw(feats)
@@ -149,8 +129,8 @@ function precomputeRegionGeometries() {
     }
 }
 
-// ── Helpers de query ───────────────────────────────────────────────────────
-
+// monta o mapa "tipo de crime -> colunas que somam aquele tipo", na ordem que
+// queremos exibir, e preenche CRIME_TYPES com os tipos que existem nos dados
 function buildCrimeTypeMap(rows) {
     const grouped = new Map();
     rows.forEach(({ variavel, tipo }) => {
@@ -180,7 +160,7 @@ function buildCrimeTypeSumExpr(typeLabel, alias = 'c') {
     return columns.map(col => `COALESCE(${alias}.${col}, 0)`).join(' + ');
 }
 
-// Wrapper genérico para queries — centraliza o tratamento de erros
+// atalho pra não escrever db.query toda hora
 async function q(sql) {
     return db.query(sql);
 }
@@ -228,8 +208,7 @@ function cross(a, b, c) {
     return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
 }
 
-// Fallback: concatena os polígonos da região sem dissolver (mantém fronteiras
-// internas). Usado só se o dissolve por cancelamento de arestas falhar.
+// plano B: só junta os polígonos da região sem tirar as divisas (se o dissolve falhar)
 function buildRegionGeometryRaw(regionFeatures) {
     const polygons = regionFeatures.flatMap(feature => {
         const geometry = feature.geometry;
@@ -265,12 +244,11 @@ function buildMapFeatures(features, aggregation) {
             NM_MUN: region,
             region
         },
-        // Geometria dissolvida (pré-calculada); só fronteiras entre regiões.
         geometry: regionGeometryCache.get(region) ?? buildRegionGeometryRaw(regionFeatures)
     }));
 }
 
-// ── Mapa coroplético (Overview) ────────────────────────────────────────────
+// desenha o mapa e, no fim, manda redesenhar os gráficos da direita
 export async function renderMap(metric, useRate, yearFrom, yearTo, aggregation = 'municipio') {
     const svg = d3.select('#chart-map');
 
@@ -278,10 +256,8 @@ export async function renderMap(metric, useRate, yearFrom, yearTo, aggregation =
 
     if (svg.empty() || !geojson) return;
 
-    // Ao trocar o nível de agregação (município ↔ região), a seleção anterior
-    // perde sentido (um município não existe no modo região e vice-versa).
-    // Limpamos a seleção e as visões de detalhe para evitar estado inconsistente
-    // no bar chart de cima — corrige o "bugzinho" da troca município↔região.
+    // se trocou município <-> região, a seleção antiga não faz mais sentido.
+    // limpa tudo pra não deixar o bar chart de cima com dado de outro modo.
     if (current.aggregation && current.aggregation !== aggregation) {
     selectedScope = null;
     detailRange = null;
@@ -292,17 +268,13 @@ export async function renderMap(metric, useRate, yearFrom, yearTo, aggregation =
     d3.select('#chart-timeline-detail').selectAll('*').remove();
 }
 
-    // Registra os parâmetros correntes para uso pelas interações dos gráficos
+    // guarda os parâmetros pra quando o clique numa barra precisar redesenhar
     current = { metric, useRate, yearFrom, yearTo, aggregation };
 
-    // top maior reserva espaço para o título do mapa (2 linhas, ~50px)
-    const mg = { left: 5, right: 5, top: 54, bottom: 5 };
+    const mg = { left: 5, right: 5, top: 54, bottom: 5 }; // top sobra pro título
 
-    // Largura/altura do container com fallbacks em cascata. Se o SVG ainda não
-    // tem largura resolvida (CSS width:100% antes do layout), usamos o container
-    // pai e, em último caso, um padrão fixo. Isso garante que o mapa SEMPRE
-    // desenhe com uma projeção válida — nunca em branco. O resize handler em
-    // main.js reajusta quando a largura real fica disponível.
+    // pega a largura/altura do SVG. às vezes no 1º render o CSS ainda não
+    // resolveu a largura (fica ~0), então tem uns fallbacks pra não nascer em branco.
     const node = svg.node();
     let rawW = node.getBoundingClientRect().width;
     if (rawW < 50 && node.parentNode) rawW = node.parentNode.getBoundingClientRect().width;
@@ -313,8 +285,8 @@ export async function renderMap(metric, useRate, yearFrom, yearTo, aggregation =
     const W = rawW - mg.left - mg.right;
     const H = rawH - mg.top  - mg.bottom;
 
-    // Agrega crimes pelo nível escolhido (município ou região) no período;
-    // no modo taxa, calcula a média anual por unidade de agregação.
+    // soma os crimes por local no período. no modo taxa, faz a média das
+    // taxas de cada ano (mais correto que somar tudo e dividir por uma pop. só).
     let rows;
     const crimeExpr = buildCrimeTypeSumExpr(metric, 'c');
     if (aggregation === 'regiao') {
@@ -382,25 +354,18 @@ export async function renderMap(metric, useRate, yearFrom, yearTo, aggregation =
         rows.forEach(d => lookup.set(String(d.fmun_cod), +d.value));
     }
 
-    // ── CÁLCULO DE ESCALA (cor) ────────────────────────────────────────────
-    // Escala quantílica: o domínio é o conjunto de valores observados e o range
-    // são 7 tons de vermelho. Diferente de scaleLinear, ela coloca ~o mesmo
-    // número de municípios em cada faixa, distribuindo-os uniformemente e
-    // impedindo que valores extremos (ex.: capital) achatem toda a paleta.
+    // cor por quantil (não linear): joga mais ou menos a mesma quantidade de
+    // locais em cada uma das 7 faixas de vermelho. usamos quantil porque a
+    // capital tem valores absurdos e numa escala linear o mapa ficaria quase todo claro.
     const colorScale = d3.scaleQuantile()
         .domain(rows.map(d => +d.value).filter(v => v > 0))
         .range(d3.schemeReds[7]);
 
-    // ── CÁLCULO DE ESCALA (geográfica) ─────────────────────────────────────
-    // A projeção Mercator converte (lon, lat) → (x, y) em pixels. fitExtent
-    // calcula automaticamente escala e translação para encaixar todo o GeoJSON
-    // dentro da área útil [W, H]. geoPath gera o atributo "d" de cada <path>.
+    // Mercator + fitExtent pra encaixar o RJ todo na área disponível
     const projection = d3.geoMercator().fitExtent([[0, 0], [W, H]], geojson);
     const pathGen = d3.geoPath().projection(projection);
 
-    // ── ATUALIZAÇÃO DO DOM (data join) ─────────────────────────────────────
-    // Grupo <g> único e idempotente: data([0]) garante que ele seja criado uma
-    // vez e apenas reaproveitado nos re-renders (em vez de duplicado).
+    // o <g> que segura os paths; data([0]) é truque pra criar uma vez só
     const g = svg.selectAll('#map-group').data([0]).join('g')
         .attr('id', 'map-group')
         .attr('transform', `translate(${mg.left},${mg.top})`);
@@ -415,18 +380,16 @@ export async function renderMap(metric, useRate, yearFrom, yearTo, aggregation =
 
     const mapFeatures = buildMapFeatures(geojson.features, aggregation);
 
-    // Data join: vincula um <path> a cada unidade do mapa (município ou região).
-    // join('path') cria os ausentes (enter), atualiza os existentes e remove
-    // os sobrando (exit) — assim a troca de métrica/período só recolore os
-    // mesmos polígonos, sem recriar o SVG inteiro.
+    // um path por local. a chave no data() inclui o modo de agregação pra
+    // forçar a troca quando alterna município/região (geometrias diferentes).
     g.selectAll('path')
     .data(
         mapFeatures,
         d => `${aggregation}-${String(d.properties.CD_MUN)}`
     )
     .join('path')
-        .attr('d', pathGen)                              // geometria projetada
-        .style('fill', d => {                            // cor ← valor via escala
+        .attr('d', pathGen)
+        .style('fill', d => {                            // cor a partir do valor
             const key = aggregation === 'regiao'
     ? d.properties.NM_MUN
     : String(d.properties.CD_MUN);
@@ -464,8 +427,7 @@ export async function renderMap(metric, useRate, yearFrom, yearTo, aggregation =
     hoveredScope = null;
     applyMapHighlight(g);
 })
-        // Click: Details on Demand — atualiza todas as linked views.
-        // Segundo clique no mesmo município desseleciona (toggle).
+        // clicar seleciona o local (e abre os detalhes); clicar de novo tira a seleção
         .on('click', async function(event, d) {
     event.stopPropagation();
     event.preventDefault();
@@ -477,7 +439,8 @@ export async function renderMap(metric, useRate, yearFrom, yearTo, aggregation =
     );
 });
 
-    // Zoom/pan — aplica transform apenas nos paths, não na legenda
+    // zoom/pan só nos paths (a legenda e o título ficam parados).
+    // registra o comportamento uma vez só e guarda o transform em currentTransform.
     if (!zoomInitialized) {
     const zoomBehavior = d3.zoom()
         .scaleExtent([1, 8])
@@ -507,9 +470,8 @@ renderLegend(svg, colorScale, mg);
 await renderLinkedViews(metric, useRate, yearFrom, yearTo, aggregation);
 }
 
-// Seleciona/desseleciona um escopo (município ou região) e re-renderiza as linked views.
-// Reutilizado pelo clique no mapa E pelo clique nas barras de "Top municípios",
-// garantindo que ambas as origens produzam exatamente o mesmo comportamento.
+// seleciona (ou tira a seleção, se clicar de novo no mesmo) e redesenha os
+// gráficos. usada tanto pelo clique no mapa quanto pelo clique numa barra do Top 5.
 async function selectScope(code, name, aggregation) {
     hoveredScope = null;
     const normalizedCode = String(code);
@@ -517,8 +479,7 @@ async function selectScope(code, name, aggregation) {
     const isSame = selectedScope?.kind === selectedKind && selectedScope?.code === normalizedCode;
     selectedScope = isSame ? null : { kind: selectedKind, code: normalizedCode, name };
 
-    // Nova seleção zera o recorte de detalhe (o brush anterior não se aplica mais)
-    detailRange = null;
+    detailRange = null; // seleção nova zera o trecho marcado na timeline
 
     applyMapHighlight(d3.select('#map-group'));
 
@@ -581,9 +542,8 @@ function applyMapHighlight(g) {
     });
 }
 
-// ── Título do mapa ─────────────────────────────────────────────────────────
-// Exibe o tipo de crime, o modo de normalização e o período correntes, deixando
-// explícito "o que" está sendo mostrado sem o usuário precisar olhar os controles.
+// título em cima do mapa: tipo de crime + modo + período, pro usuário não
+// precisar olhar os controles pra saber o que está vendo
 function renderMapTitle(svg, metric, useRate, yearFrom, yearTo, aggregation) {
     svg.selectAll('#map-title').remove();
     const W = +svg.node().getBoundingClientRect().width;
@@ -604,7 +564,7 @@ function renderMapTitle(svg, metric, useRate, yearFrom, yearTo, aggregation) {
         .text(`${modo} · ${periodo}`);
 }
 
-// ── Legenda de cor ─────────────────────────────────────────────────────────
+// legenda: os 7 quadradinhos de cor com as faixas de valor
 function renderLegend(svg, colorScale, mg) {
     svg.selectAll('#legend').remove();
     const quantiles = colorScale.quantiles();
@@ -630,9 +590,7 @@ function renderLegend(svg, colorScale, mg) {
 
 const fmt = n => n.toLocaleString('pt-BR', { maximumFractionDigits: 1 });
 
-// ── Orquestrador das linked views ──────────────────────────────────────────
-// Coordena os 3 gráficos secundários: top crimes, top municípios e timeline.
-// Todos reagem ao mesmo estado (tipo de crime, período, município selecionado).
+// redesenha os 3 gráficos da direita/baixo a partir do estado atual
 async function renderLinkedViews(metric, useRate, yearFrom, yearTo, aggregation) {
     const code = selectedScope?.code ?? null;
     const name = selectedScope?.name ?? null;
@@ -651,7 +609,7 @@ async function renderLinkedViews(metric, useRate, yearFrom, yearTo, aggregation)
 );
 }
 
-// ── Todos os tipos de crime do escopo selecionado (ou estado) ───────────
+// bar chart com os 6 tipos de crime do local selecionado (ou do estado todo)
 async function renderTopCrimesChart(code, name, useRate, yearFrom, yearTo, aggregation) {
     const scopeFilter = !code
     ? '1=1'
@@ -703,7 +661,7 @@ async function renderTopCrimesChart(code, name, useRate, yearFrom, yearTo, aggre
 );
 }
 
-// ── Top 5 municípios para o tipo selecionado ─────────────────────────────
+// bar chart com os 5 locais que mais têm o tipo de crime selecionado
 async function renderTopMunChart(metric, useRate, yearFrom, yearTo, aggregation) {
     const crimeExpr = buildCrimeTypeSumExpr(metric, 'c');
     let rows;
@@ -781,15 +739,14 @@ async function renderTopMunChart(metric, useRate, yearFrom, yearTo, aggregation)
         '#5a8fc9',
         {
             hint: aggregation === 'regiao' ? 'clique em uma região para selecioná-la' : 'clique em um município para selecioná-lo',
-            // Cross-filtering: seleciona o município no mapa e abre seus detalhes
+            // clicar na barra seleciona aquele local no mapa
             onBarClick: d => selectScope(d.code, d.label, aggregation),
         }
     );
 }
 
-// ── Reutilizável: bar chart horizontal ────────────────────────────────────
-// opts.onBarClick(d): se fornecido, torna as barras clicáveis (cross-filtering).
-// opts.hint: texto-dica exibido sob o título indicando a interação disponível.
+// função genérica de bar chart, usada pelos dois gráficos de cima.
+// opts.onBarClick deixa as barras clicáveis; opts.hint põe uma dica embaixo do título.
 function drawBarChart(selector, data, title, yLabel, color, opts = {}) {
     const { onBarClick = null, hint = null } = opts;
     const svg = d3.select(selector);
@@ -826,7 +783,6 @@ function drawBarChart(selector, data, title, yLabel, color, opts = {}) {
         .attr('fill', '#1f4e79')
         .text(title);
 
-    // Dica de interação (ex.: "clique para filtrar")
     if (hint) {
         svg.append('text').attr('x', W / 2).attr('y', 32)
             .attr('text-anchor', 'middle').attr('font-size', '9px')
@@ -834,12 +790,8 @@ function drawBarChart(selector, data, title, yLabel, color, opts = {}) {
             .text(hint);
     }
 
-    // ── CÁLCULO DE ESCALAS (barras) ────────────────────────────────────────
-    // x (banda/ordinal): uma faixa por categoria, com padding de 22% entre
-    //   barras. x(label) dá a posição e x.bandwidth() a largura de cada barra.
-    // y (linear): magnitude → altura. domain começa em 0 (zero significativo) e
-    //   sobe 12% acima do máximo para folga do rótulo; .nice() arredonda os
-    //   limites. range invertido [iH, 0] porque em SVG o y cresce para baixo.
+    // x: uma barra por categoria. y: valor -> altura (começa no 0, com 12% de
+    // folga em cima pro rótulo). y vai de iH a 0 porque no SVG o y cresce pra baixo.
     const x = d3.scaleBand().domain(chartData.map(d => d.label)).range([0, iW]).padding(0.22);
     const maxValue = d3.max(chartData, d => d.val) ?? 0;
     const y = d3.scaleLinear()
@@ -849,17 +801,15 @@ function drawBarChart(selector, data, title, yLabel, color, opts = {}) {
 
     const g = svg.append('g').attr('transform', `translate(${m.left},${m.top})`);
 
-    // Tooltip compartilhado (criado no renderMap); reutilizado aqui
-    const tip = d3.select('body').select('#tooltip');
+    const tip = d3.select('body').select('#tooltip'); // reusa o tooltip do mapa
 
-    // Data join: um <rect> por item. Posição/tamanho derivam das escalas; a
-    // altura é iH - y(val) porque y(val) é a coordenada do topo da barra.
+    // um retângulo por barra
     g.selectAll('rect').data(chartData).join('rect')
         .attr('fill', color).attr('rx', 2)
         .attr('x', d => x(d.label)).attr('width', x.bandwidth())
         .attr('y', d => y(d.val)).attr('height', d => iH - y(d.val))
         .style('cursor', onBarClick ? 'pointer' : 'default')
-        // Hover: realça a barra e mostra o valor exato (Details on Demand)
+        // hover escurece a barra e mostra o valor
         .on('mouseover', function (event, d) {
             d3.select(this).attr('fill', d3.color(color).darker(0.6));
             if (!tip.empty()) tip.style('display', 'block').html(
@@ -905,7 +855,7 @@ function drawBarChart(selector, data, title, yLabel, color, opts = {}) {
     .text(yLabel);
 }
 
-// ── Timeline: série histórica mensal (dimensão "when") ────────────────────
+// timeline de cima (contexto): a série mês a mês do período inteiro
 async function renderTimeline(code, name, metric, useRate, yearFrom, yearTo, aggregation) {
     const container = document.getElementById('timeline-container');
     if (container) container.style.display = 'block';
@@ -914,7 +864,6 @@ async function renderTimeline(code, name, metric, useRate, yearFrom, yearTo, agg
     if (svg.empty()) return;
     svg.selectAll('*').remove();
 
-    // Série mensal com normalização por população se useRate
     const crimeExpr = buildCrimeTypeSumExpr(metric, 'c');
     
     const scopeFilter = !code
@@ -953,16 +902,13 @@ async function renderTimeline(code, name, metric, useRate, yearFrom, yearTo, agg
     const iW = W - m.left - m.right;
     const iH = H - m.top  - m.bottom;
 
-    // Number() evita erro se DuckDB retornar BigInt nos campos inteiros
+    // Number() porque o DuckDB às vezes devolve BigInt em ano/mes
     const parsed = rows.map(d => ({
         date: new Date(Number(d.ano), Number(d.mes) - 1, 1),
         val: +d.value
     }));
 
-    // ── CÁLCULO DE ESCALAS (timeline) ──────────────────────────────────────
-    // x (tempo): d3.extent pega [primeira data, última data] como domínio,
-    //   mapeando-as à largura útil — eixo temporal contínuo.
-    // y (linear): magnitude → altura, novamente com range invertido [iH, 0].
+    // x = tempo, y = valor
     const x = d3.scaleTime().domain(d3.extent(parsed, d => d.date)).range([0, iW]);
     const y = d3.scaleLinear().domain([0, d3.max(parsed, d => d.val) ?? 1]).nice().range([iH, 0]);
 
@@ -971,7 +917,6 @@ async function renderTimeline(code, name, metric, useRate, yearFrom, yearTo, agg
         .attr('fill', '#1f4e79')
 .text(`${metric} — ${name} (série histórica mensal)`);
 
-    // Dica da interação de brushing
     svg.append('text').attr('x', W / 2).attr('y', 32)
         .attr('text-anchor', 'middle').attr('font-size', '9px')
         .attr('fill', '#999').attr('font-style', 'italic')
@@ -979,7 +924,7 @@ async function renderTimeline(code, name, metric, useRate, yearFrom, yearTo, agg
 
     const g = svg.append('g').attr('transform', `translate(${m.left},${m.top})`);
 
-    // Área preenchida reforça leitura de magnitude ao longo do tempo
+    // área clarinha embaixo da linha só pra dar peso visual
     g.append('path').datum(parsed)
         .attr('fill', '#2c6fad').attr('fill-opacity', 0.12)
         .attr('d', d3.area().x(d => x(d.date)).y0(iH).y1(d => y(d.val)).curve(d3.curveMonotoneX));
@@ -988,19 +933,13 @@ async function renderTimeline(code, name, metric, useRate, yearFrom, yearTo, agg
         .attr('fill', 'none').attr('stroke', '#2c6fad').attr('stroke-width', 1.8)
         .attr('d', d3.line().x(d => x(d.date)).y(d => y(d.val)).curve(d3.curveMonotoneX));
 
-    // ── Brushing temporal · FOCUS + CONTEXT (dimensão "when") ──────────────
-    // Esta timeline é o CONTEXTO (toda a série do período). Arrastar na
-    // horizontal seleciona um trecho que é plotado, mês a mês, no gráfico de
-    // DETALHE logo abaixo — o padrão "focus + context" (exemplo do professor).
-    // Clicar fora (seleção vazia) limpa o detalhe. Adicionado ANTES dos
-    // círculos para que estes fiquem clicáveis por cima.
-    // Handler único para 'brush' (durante o arraste) e 'end' (ao soltar).
-    // Atualizar já no 'brush' faz o gráfico de baixo reagir AO VIVO conforme se
-    // arrasta — a sensação de "puxar os meses para o detalhe". É barato: só
-    // filtra o array `parsed` em memória e redesenha (sem consultar o banco).
+    // o brush daqui é o "context": o trecho que o usuário arrasta vai pro
+    // gráfico de baixo (o "focus"), mês a mês. atualizo já no 'brush' (e não só
+    // no 'end') pra timeline de baixo acompanhar ao vivo — é barato porque só
+    // filtra o array em memória, sem ir no banco de novo.
     const onBrush = (event) => {
-        if (!event.sourceEvent) return;            // ignora brush.move programático
-        if (!event.selection) {                    // clique simples = limpa o detalhe
+        if (!event.sourceEvent) return;            // ignora quando eu mesmo movo o brush
+        if (!event.selection) {                    // clicou sem arrastar -> limpa
             detailRange = null;
             renderTimelineDetail(parsed, metric, useRate, name, aggregation);
             return;
@@ -1013,7 +952,7 @@ async function renderTimeline(code, name, metric, useRate, yearFrom, yearTo, agg
         .extent([[0, 0], [iW, iH]])
         .on('brush end', onBrush);
     const brushG = g.append('g').attr('class', 'time-brush').call(brush);
-    // Reaplica visualmente a seleção anterior (ao re-renderizar por troca de tipo)
+    // se já tinha um trecho marcado, redesenha a faixa cinza no lugar
     if (detailRange) {
         const px = detailRange.map(d => Math.max(0, Math.min(iW, x(d))));
         if (px[1] - px[0] > 1) brushG.call(brush.move, px);
@@ -1042,15 +981,12 @@ async function renderTimeline(code, name, metric, useRate, yearFrom, yearTo, agg
         .attr('font-weight', 'bold')
         .text(useRate ? 'Taxa / 10k' : 'Total');
 
-    // Renderiza (ou reaplica) o gráfico de detalhe abaixo: placeholder se não há
-    // recorte ativo, ou o trecho selecionado mês a mês se há.
+    // desenha a timeline de baixo (ou a dica, se ainda não marcou nada)
     renderTimelineDetail(parsed, metric, useRate, name, aggregation);
 }
 
-// ── Timeline de DETALHE (focus) — trecho selecionado, mês a mês ────────────
-// Recebe a série completa (parsed) e, se houver um recorte ativo (detailRange),
-// plota apenas os meses dentro dele com o eixo X em granularidade mensal e
-// rótulos em português. Sem recorte, mostra uma dica de uso.
+// timeline de baixo (focus): mostra só o trecho marcado em cima, com os meses
+// no eixo. recebe a série inteira e filtra pelo detailRange.
 const MESES_ABBR = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
 const fmtMesAno = d => `${MESES_ABBR[d.getMonth()]}/${d.getFullYear()}`;
 
@@ -1062,7 +998,7 @@ function renderTimelineDetail(parsed, metric, useRate, name, aggregation) {
     const W = +svg.node().getBoundingClientRect().width;
     const H = +svg.node().getBoundingClientRect().height;
 
-    // Sem recorte ativo → dica de uso (estado inicial do focus + context)
+    // ninguém marcou nada ainda -> mostra a dica
     if (!detailRange) {
         svg.append('text').attr('x', W / 2).attr('y', 19)
             .attr('text-anchor', 'middle').attr('font-size', '13px').attr('font-weight', '700')
@@ -1073,7 +1009,7 @@ function renderTimelineDetail(parsed, metric, useRate, name, aggregation) {
         return;
     }
 
-    // Recorte ativo: filtra os meses dentro de [d0, d1]
+    // pega só os meses dentro do trecho (ordena as pontas por garantia)
     const [d0, d1] = detailRange[0] <= detailRange[1] ? detailRange : [detailRange[1], detailRange[0]];
     const sub = parsed.filter(d => d.date >= d0 && d.date <= d1);
 
@@ -1088,8 +1024,7 @@ function renderTimelineDetail(parsed, metric, useRate, name, aggregation) {
     const iW = W - m.left - m.right;
     const iH = H - m.top - m.bottom;
 
-    // ── CÁLCULO DE ESCALAS (detalhe) ───────────────────────────────────────
-    // x temporal limitado ao recorte; y linear a partir do zero, com folga.
+    // mesmas escalas da de cima, mas o x cobre só o trecho marcado
     const x = d3.scaleTime().domain(d3.extent(sub, d => d.date)).range([0, iW]);
     const y = d3.scaleLinear().domain([0, d3.max(sub, d => d.val) ?? 1]).nice().range([iH, 0]);
 
@@ -1100,7 +1035,7 @@ function renderTimelineDetail(parsed, metric, useRate, name, aggregation) {
 
     const g = svg.append('g').attr('transform', `translate(${m.left},${m.top})`);
 
-    // Área + linha, mesma identidade visual da timeline de contexto
+    // mesma cara da timeline de cima (área + linha)
     g.append('path').datum(sub)
         .attr('fill', '#2c6fad').attr('fill-opacity', 0.12)
         .attr('d', d3.area().x(d => x(d.date)).y0(iH).y1(d => y(d.val)).curve(d3.curveMonotoneX));
@@ -1131,8 +1066,8 @@ function renderTimelineDetail(parsed, metric, useRate, name, aggregation) {
             if (!tip.empty()) tip.style('display', 'none');
         });
 
-    // ── Eixo X em granularidade MENSAL (meses explícitos) ──────────────────
-    // Escolhe o passo dos ticks conforme o nº de meses, para não poluir.
+    // eixo X com os meses. ajusta de quantos em quantos meses mostrar um tick,
+    // senão fica tudo embolado quando o trecho é grande.
     const months = sub.length;
     const step = months <= 14 ? 1 : months <= 30 ? 2 : months <= 60 ? 4 : 6;
     svg.append('g').attr('transform', `translate(${m.left},${m.top + iH})`)
@@ -1152,7 +1087,7 @@ function renderTimelineDetail(parsed, metric, useRate, name, aggregation) {
         .text(useRate ? 'Taxa / 10k' : 'Total');
 }
 
-// ── Limpeza ────────────────────────────────────────────────────────────────
+// botão "limpar seleção": zera tudo e apaga os gráficos de detalhe
 export function clearCharts() {
     selectedScope = null;
     detailRange = null;

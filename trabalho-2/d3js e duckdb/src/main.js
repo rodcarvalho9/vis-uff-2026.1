@@ -1,21 +1,14 @@
-// ════════════════════════════════════════════════════════════════════════
-// main.js — Ponto de entrada, gerenciamento de estado e ligação dos controles
-//
-// GERENCIAMENTO DE ESTADO DA INTERAÇÃO
-// Toda a aplicação gira em torno de um único objeto `state` (single source of
-// truth). Nenhum gráfico guarda estado próprio: qualquer interação (toggle,
-// busca de tipo de crime, filtro de período, clique em barra, brushing) apenas
-// MUTA `state` e chama render(), que repassa o estado a renderMap(). O mapa,
-// por sua vez, re-renderiza todas as visões coordenadas a partir desse estado.
-// Esse fluxo unidirecional (interação → estado → render) mantém as quatro
-// visões sempre consistentes entre si.
-// ════════════════════════════════════════════════════════════════════════
+// main.js
+// É aqui que o app começa e onde fica o "estado" — um objeto só (state) com o
+// que está selecionado. A regra: qualquer botão/clique muda o state e chama
+// render(); o render manda o map.js redesenhar tudo a partir daí. Assim os
+// gráficos nunca saem de sincronia, porque todos leem do mesmo lugar.
+
 import { initData, renderMap, clearCharts, CRIME_TYPES, setInteractionHandlers } from './map';
 
-// Estado global — única fonte de verdade para todos os renders.
-//   metric   : tipo de crime exibido no mapa (ex.: 'Furtos')
-//   useRate  : false = total absoluto · true = taxa por 10 mil habitantes
-//   yearFrom/yearTo : janela temporal (inclusive) usada nas agregações
+// o estado da aplicação
+//   metric: tipo de crime no mapa | useRate: false=total, true=taxa/10mil hab
+//   aggregation: 'municipio' ou 'regiao' | yearFrom/yearTo: janela de anos
 const state = {
     metric: 'Crimes Violentos',
     useRate: true,
@@ -24,8 +17,7 @@ const state = {
     yearTo: 2025,
 };
 
-// Único ponto de re-renderização: lê o estado atual e o repassa ao mapa, que
-// orquestra mapa + top crimes + top municípios + timeline de forma coordenada.
+// manda o mapa (e o resto) redesenhar com o estado atual
 async function render() {
     await renderMap(state.metric, state.useRate, state.yearFrom, state.yearTo, state.aggregation);
 }
@@ -37,12 +29,10 @@ window.onload = async () => {
     const geojson = await fetch('RJ_Municipios_2025.geojson').then(r => r.json());
     await initData(geojson);
 
-    // ── Combobox pesquisável de tipos de crime ───────────────────────────
-    // Substitui o <select> nativo por um campo de busca com lista filtrável,
-    // necessário porque são seis tipos e a varredura visual é simples.
+    // campo de busca de tipo de crime (no lugar de um <select> comum)
     setupMetricCombo();
 
-    // ── Popula <select> de anos 2014–2025 ──────────────────────────────────
+    // preenche os selects de ano (2014 a 2025)
     const yearFromSel = document.querySelector('#yearFrom');
     const yearToSel   = document.querySelector('#yearTo');
     for (let y = 2014; y <= 2025; y++) {
@@ -50,19 +40,18 @@ window.onload = async () => {
         yearToSel.add(  new Option(y, y, y === 2025, y === 2025));
     }
 
-    // ── Registra os callbacks de cross-filtering dos gráficos ──────────────
-    // Fecham o ciclo de Linked Views: uma interação num gráfico secundário
-    // atualiza o estado global e re-renderiza todo o dashboard de forma coerente.
+    // o map.js chama esses callbacks quando clicam numa barra; aqui a gente
+    // muda o estado e redesenha (é o que faz o clique no gráfico mexer no mapa)
     setInteractionHandlers({
-        // Clique numa barra de "Top crimes": o crime vira a métrica do mapa
+        // clicou num tipo de crime no gráfico -> vira a métrica do mapa
         onMetricPick: (metric) => {
             if (!CRIME_TYPES.includes(metric) || metric === state.metric) return;
             state.metric = metric;
             const input = document.querySelector('#metricSearch');
-            if (input) input.value = metric;       // sincroniza o campo de busca
+            if (input) input.value = metric;       // atualiza o texto da busca
             render();
         },
-        // Brushing na timeline: o intervalo arrastado vira o período global
+        // (sobra de uma versão antiga em que o brush mudava o período)
         onPeriodPick: (from, to) => {
             const a = Math.max(2014, Math.min(from, to));
             const b = Math.min(2025, Math.max(from, to));
@@ -75,8 +64,7 @@ window.onload = async () => {
         },
     });
 
-    // ── Listeners ─────────────────────────────────────────────────────────
-
+    // botões da barra de controle
     document.querySelector('#btn-total').addEventListener('click', () => {
         state.useRate = false;
         document.querySelector('#btn-total').classList.add('active');
@@ -128,7 +116,7 @@ window.onload = async () => {
 
     document.querySelector('#clearBtn').addEventListener('click', clearCharts);
 
-    // Inicializa visualmente os toggles conforme o estado
+    // deixa os botões com o visual certo conforme o estado inicial
 document.querySelector('#btn-rate')
     .classList.toggle('active', state.useRate);
 
@@ -141,18 +129,13 @@ document.querySelector('#btn-municipio')
 document.querySelector('#btn-regiao')
     .classList.toggle('active', state.aggregation === 'regiao');
 
-    // Esconde overlay e renderiza o estado inicial
+    // tira o "carregando" e desenha pela primeira vez
     overlay.classList.add('hidden');
 
     const mapSvg = document.querySelector('#chart-map');
-
-    // ── Render inicial ─────────────────────────────────────────────────────
-    // Renderiza imediatamente. O renderMap tem fallback de largura, então
-    // sempre desenha algo mesmo que o layout ainda não tenha resolvido a
-    // largura do container — nunca fica em branco.
     await render();
 
-    // ── Re-render responsivo a redimensionamentos ──────────────────────────
+    // redesenha quando a janela muda de tamanho (com um debouncezinho)
     let lastWidth = mapSvg.getBoundingClientRect().width;
     let resizeTimer = null;
     const onResize = () => {
@@ -167,7 +150,7 @@ document.querySelector('#btn-regiao')
     }
     window.addEventListener('resize', onResize);
 
-    // ── Combobox pesquisável (definido aqui para acessar state/render) ──────
+    // campo de busca de tipo de crime. fica aqui dentro pra enxergar state/render.
     function setupMetricCombo() {
         const combo  = document.querySelector('#metric-combo');
         const input  = document.querySelector('#metricSearch');

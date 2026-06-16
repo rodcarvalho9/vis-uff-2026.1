@@ -1,14 +1,10 @@
-// ════════════════════════════════════════════════════════════════════════
-// config.js — Inicialização do DuckDB-WASM (camada de dados)
-//
-// DuckDB roda inteiramente no navegador, compilado para WebAssembly. Aqui
-// selecionamos e instanciamos o "bundle" adequado e expomos loadDb(), usada
-// pela classe Crime para abrir conexões e consultar os CSVs via SQL.
-// ════════════════════════════════════════════════════════════════════════
+// config.js
+// Sobe o DuckDB compilado pra WebAssembly (roda no próprio navegador).
+// Exporta loadDb(), que a database.js usa pra abrir a conexão e rodar SQL.
+
 import * as duckdb from '@duckdb/duckdb-wasm';
-// Vite resolve estes imports para URLs dos artefatos .wasm e dos workers.
-// Há dois bundles: 'mvp' (compatível com qualquer navegador) e 'eh'
-// (exception handling — mais rápido, exige suporte do navegador).
+// o Vite transforma esses imports nas URLs dos .wasm e dos workers.
+// tem dois bundles: mvp (funciona em tudo) e eh (mais rápido, se o navegador suportar).
 import duckdb_wasm from '@duckdb/duckdb-wasm/dist/duckdb-mvp.wasm?url';
 import mvp_worker from '@duckdb/duckdb-wasm/dist/duckdb-browser-mvp.worker.js?url';
 import duckdb_wasm_eh from '@duckdb/duckdb-wasm/dist/duckdb-eh.wasm?url';
@@ -25,19 +21,14 @@ const MANUAL_BUNDLES = {
   },
 };
 
-// Cria e instancia uma base DuckDB-WASM pronta para uso. Retorna a instância
-// AsyncDuckDB; quem chama é responsável por abrir a conexão (db.connect()).
+// devolve uma instância do DuckDB pronta pra usar (quem chama abre a conexão)
 export async function loadDb() {
-  // selectBundle inspeciona o navegador e escolhe 'eh' se houver suporte,
-  // caindo para 'mvp' caso contrário.
-  const bundle = await duckdb.selectBundle(MANUAL_BUNDLES);
+  const bundle = await duckdb.selectBundle(MANUAL_BUNDLES); // escolhe mvp ou eh
 
-  // O banco roda numa Web Worker para não bloquear a thread principal (UI).
+  // roda numa Web Worker pra não travar a interface
   const worker = new Worker(bundle.mainWorker);
   const logger = new duckdb.ConsoleLogger();
   const db = new duckdb.AsyncDuckDB(logger, worker);
-
-  // Carrega o módulo WASM dentro da worker; só depois disso o banco está pronto.
   await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
 
   return db;
